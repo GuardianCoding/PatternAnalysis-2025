@@ -1,0 +1,37 @@
+train_root: /data/train
+val_root: /data/val
+out_dir: outputs
+exp_defaults: mamba_lab
+
+# training
+epochs: 30
+batch_size: 8            # per-GPU
+grad_accum: 2            # effective 16
+lr: 2.0e-4
+weight_decay: 0.05
+warmup_steps: 1000
+amp: true
+ema_decay: 0.999
+num_workers: 8
+save_every: 2000
+val_every: 1000
+
+# loss weights
+lambda_l1: 1.0
+lambda_lpips: 0.2
+
+# aug
+crop_size: 256
+hflip: true
+rgb_jitter_prob: 0.2
+rgb_jitter_strength: 0.1
+
+# model
+model:
+  variant:     # for logging only
+  embed_dim: 96
+  depths: [4,4,6,4]
+
+# ckpt
+pretrained:
+resume: null
