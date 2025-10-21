@@ -3,7 +3,9 @@
 
 ENV_NAME := mamba-colour
 
-.PHONY: setup reinstall clean veryclean
+SHELL := /bin/bash
+
+.PHONY: setup reinstall clean veryclean dataset
 
 setup:
 	@echo "[Make] Creating/refreshing conda env '$(ENV_NAME)'..."
@@ -23,3 +25,9 @@ clean:
 # Remove env + checkout (careful!)
 veryclean: clean
 	conda env remove -n $(ENV_NAME) || true
+
+dataset:
+	@echo "Downloading Dataset..."
+	@chmod +x scripts/download_datasets.sh
+	bash scripts/download_datasets.sh
+	@echo "Datasets downloaded under ./datasets"
