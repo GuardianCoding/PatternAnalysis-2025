@@ -1,26 +1,30 @@
-import random
-from typing import Tuple
-
+# dataset.py
+import os, random
+from typing import Tuple, Optional
 import torch
-from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torchvision.datasets import CocoDetection
 import torchvision.transforms.functional as F
 from torchvision.transforms import InterpolationMode
 from PIL import Image
 import kornia
 
+__all__ = [
+    "CocoColorisationTrain",
+    "CocoColorisationEval",
+    "build_coco_dataloaders",
+]
+
+# ------------------------ util funcs ------------------------
 
 def _resize_min_side(img: Image.Image, min_side: int) -> Image.Image:
-    """Resize so the shortest side is >= min_side, preserving aspect ratio."""
     w, h = img.size
     if min(w, h) >= min_side:
         return img
     scale = float(min_side) / min(w, h)
     return img.resize((int(w * scale + 0.5), int(h * scale + 0.5)), Image.BICUBIC)
 
-
 def _random_longside_resize(img: Image.Image, target: int, scale_range: Tuple[float, float]) -> Image.Image:
-    """Resize so the *long* side is target * s, s∈[a,b], preserving aspect ratio."""
     s = random.uniform(*scale_range)
     long_side = int(target * s)
     w, h = img.size
@@ -30,28 +34,16 @@ def _random_longside_resize(img: Image.Image, target: int, scale_range: Tuple[fl
         new_h, new_w = long_side, int(w * long_side / h + 0.5)
     return img.resize((new_w, new_h), Image.BICUBIC)
 
-
 def _to_L_ab(img_rgb: Image.Image):
-    """Convert PIL RGB -> normalized (L, ab) tensors using kornia (L in [0,1], ab ~ [-1,1])."""
-    rgb = F.to_tensor(img_rgb).unsqueeze(0)               # (1,3,H,W)
-    lab = kornia.color.rgb_to_lab(rgb)                    # L in [0,100], ab ~ [-128,127]
+    rgb = F.to_tensor(img_rgb).unsqueeze(0)          # (1,3,H,W)
+    lab = kornia.color.rgb_to_lab(rgb)               # L [0,100], ab ~ [-128,127]
     L   = lab[:, :1] / 100.0
     ab  = lab[:, 1:] / 128.0
     return L.squeeze(0), ab.squeeze(0)
 
+# ------------------------ datasets ------------------------
 
 class CocoColorisationTrain(Dataset):
-    """
-    COCO colorisation dataset (training).
-    - Uses CocoDetection, ignores labels.
-    - Geometric augs applied identically to gray and RGB by operating on PIL first:
-        * random long-side resize (scale_range)
-        * ensure min side >= crop_size
-        * random crop (crop_size x crop_size)
-        * random horizontal flip
-        * optional mild RGB jitter (brightness/contrast/saturation)
-    - Returns: (L, ab, filename)
-    """
     def __init__(self,
                  img_root: str,
                  ann_file: str,
@@ -62,45 +54,34 @@ class CocoColorisationTrain(Dataset):
                  longside_scale_range: Tuple[float, float] = (1.00, 1.15)):
         super().__init__()
         self.ds = CocoDetection(img_root=img_root, annFile=ann_file)
-        self.crop_size = crop_size
-        self.hflip = hflip
-        self.rgb_jitter_prob = rgb_jitter_prob
-        self.rgb_jitter = torch.nn.Sequential(  # lightweight, reproducible via F if preferred
-            # Use torchvision ColorJitter via functional for deterministic? Keeping simple here:
-        )
-        # Store strengths for F.adjust_* use
-        self._jitter_s = rgb_jitter_strength
-        self.scale_range = longside_scale_range
+        self.crop_size = int(crop_size)
+        self.hflip = bool(hflip)
+        self.rgb_jitter_prob = float(rgb_jitter_prob)
+        self._jitter_s = float(rgb_jitter_strength)
+        self.scale_range = tuple(longside_scale_range)
 
-    def __len__(self):
-        return len(self.ds)
+    def __len__(self): return len(self.ds)
 
     def _jitter_rgb(self, img: Image.Image) -> Image.Image:
-        # Apply simple jitter via functional to avoid global RNG changes.
         s = self._jitter_s
-        # Brightness/contrast/saturation ±s
-        if s <= 0:
-            return img
-        if random.random() < 1.0:  # apply all three in a random order
-            # brightness
-            b = 1.0 + random.uniform(-s, s)
-            img = F.adjust_brightness(img, b)
-            # contrast
-            c = 1.0 + random.uniform(-s, s)
-            img = F.adjust_contrast(img, c)
-            # saturation (convert to tensor for F.adjust_saturation which expects tensor)
-            tensor = F.to_tensor(img)
-            sat = 1.0 + random.uniform(-s, s)
-            tensor = F.adjust_saturation(tensor, sat)
-            img = F.to_pil_image(tensor)
-        return img
+        if s <= 0: return img
+        # brightness
+        b = 1.0 + random.uniform(-s, s)
+        img = F.adjust_brightness(img, b)
+        # contrast
+        c = 1.0 + random.uniform(-s, s)
+        img = F.adjust_contrast(img, c)
+        # saturation (tensor path)
+        t = F.to_tensor(img)
+        sat = 1.0 + random.uniform(-s, s)
+        t = F.adjust_saturation(t, sat)
+        return F.to_pil_image(t)
 
     def __getitem__(self, idx: int):
         img, _ = self.ds[idx]
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        # Geometric augs
         img = _random_longside_resize(img, self.crop_size, self.scale_range)
         img = _resize_min_side(img, self.crop_size)
 
@@ -110,42 +91,31 @@ class CocoColorisationTrain(Dataset):
         if self.hflip and random.random() < 0.5:
             img = F.hflip(img)
 
-        # Optional color jitter (RGB only; target remains RGB)
         if random.random() < self.rgb_jitter_prob:
             img = self._jitter_rgb(img)
 
-        # Convert to L/ab
         L, ab = _to_L_ab(img)
 
-        # Filename (for tracking)
         img_id = self.ds.ids[idx]
         file_name = self.ds.coco.loadImgs(img_id)[0]["file_name"]
-
         return L, ab, file_name
 
 
 class CocoColorisationEval(Dataset):
-    """
-    COCO colorisation dataset (evaluation/validation).
-    - Deterministic: resize shortest side >= crop_size, center crop, no flip, no jitter.
-    - Returns: (L, ab, filename)
-    """
     def __init__(self,
                  img_root: str,
                  ann_file: str,
                  crop_size: int = 256):
         super().__init__()
         self.ds = CocoDetection(img_root=img_root, annFile=ann_file)
-        self.crop_size = crop_size
+        self.crop_size = int(crop_size)
 
-    def __len__(self):
-        return len(self.ds)
+    def __len__(self): return len(self.ds)
 
     def __getitem__(self, idx: int):
         img, _ = self.ds[idx]
         if img.mode != "RGB":
             img = img.convert("RGB")
-
         img = _resize_min_side(img, self.crop_size)
         img = F.center_crop(img, [self.crop_size, self.crop_size])
 
@@ -153,5 +123,85 @@ class CocoColorisationEval(Dataset):
 
         img_id = self.ds.ids[idx]
         file_name = self.ds.coco.loadImgs(img_id)[0]["file_name"]
-
         return L, ab, file_name
+
+# ------------------------ dataloader factory ------------------------
+
+def _worker_init_fn(worker_id: int):
+    # make random ops reproducible-ish across workers
+    seed = torch.initial_seed() % (2**32)
+    random.seed(seed)
+
+def build_coco_dataloaders(
+    cfg: dict,
+    use_ddp: bool = False,
+    rank: int = 0,
+):
+    """
+    Build train/eval dataloaders and (optional) samplers from a config dict.
+
+    Expected cfg keys (with defaults):
+      - train_root: "./datasets/coco/train2017"
+      - val_root:   "./datasets/coco/val2017"
+      - ann_root:   "./datasets/coco/annotations"
+      - crop_size:  256
+      - hflip: True
+      - rgb_jitter_prob: 0.2
+      - rgb_jitter_strength: 0.1
+      - longside_scale_range: (1.0, 1.15)
+      - batch_size: 10
+      - val_batch_size: 8
+      - num_workers: 6
+      - num_workers_val: 4
+      - prefetch_factor: 4
+    """
+    train_root = cfg.get("train_root", "./datasets/coco/train2017")
+    val_root   = cfg.get("val_root",   "./datasets/coco/val2017")
+    ann_root   = cfg.get("ann_root",   "./datasets/coco/annotations")
+    crop_size  = int(cfg.get("crop_size", 256))
+
+    train_ds = CocoColorisationTrain(
+        img_root=train_root,
+        ann_file=os.path.join(ann_root, "instances_train2017.json"),
+        crop_size=crop_size,
+        hflip=bool(cfg.get("hflip", True)),
+        rgb_jitter_prob=float(cfg.get("rgb_jitter_prob", 0.2)),
+        rgb_jitter_strength=float(cfg.get("rgb_jitter_strength", 0.1)),
+        longside_scale_range=tuple(cfg.get("longside_scale_range", (1.00, 1.15))),
+    )
+    eval_ds = CocoColorisationEval(
+        img_root=val_root,
+        ann_file=os.path.join(ann_root, "instances_val2017.json"),
+        crop_size=crop_size,
+    )
+
+    train_sampler: Optional[DistributedSampler] = None
+    eval_sampler: Optional[DistributedSampler]  = None
+    if use_ddp:
+        train_sampler = DistributedSampler(train_ds, shuffle=True, drop_last=False)
+        eval_sampler  = DistributedSampler(eval_ds,  shuffle=False, drop_last=False)
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=int(cfg.get("batch_size", 10)),
+        shuffle=(not use_ddp),
+        sampler=train_sampler,
+        num_workers=int(cfg.get("num_workers", 6)),
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=int(cfg.get("prefetch_factor", 4)),
+        worker_init_fn=_worker_init_fn,
+    )
+
+    eval_loader = DataLoader(
+        eval_ds,
+        batch_size=int(cfg.get("val_batch_size", 8)),
+        shuffle=False,
+        sampler=eval_sampler,
+        num_workers=max(1, int(cfg.get("num_workers_val", 4))),
+        pin_memory=True,
+        persistent_workers=True,
+        worker_init_fn=_worker_init_fn,
+    )
+
+    return train_loader, eval_loader, train_sampler, eval_sampler
