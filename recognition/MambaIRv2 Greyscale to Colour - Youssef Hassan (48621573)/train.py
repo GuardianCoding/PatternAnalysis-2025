@@ -3,6 +3,7 @@ from pathlib import Path
 import yaml
 import torch
 import torch.distributed as dist
+from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim import AdamW
@@ -11,10 +12,11 @@ from dataset import build_coco_dataloaders
 from modules import build_mambairv2_colorizer
 from utils.metrics import set_seed, lab_to_rgb, lpips_loss
 from utils.train_tracker import StatTracker
+from utils.checkpoint_io import save_ckpt, load_ckpt
 
 # --------------------- utilities ---------------------
 class EMA:
-    def __init__(self, model, decay):
+    def __init__(self, model: Module, decay):
         self.decay = decay
         self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
         for p in self.shadow.values():
@@ -27,29 +29,6 @@ class EMA:
     @torch.no_grad()
     def apply_to(self, model):
         model.load_state_dict(self.shadow, strict=False)
-
-def save_ckpt(path, model, opt, scaler, step, best_lpips, ema=None):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
-        "model": model.state_dict(),
-        "optimizer": opt.state_dict(),
-        "scaler": scaler.state_dict() if scaler is not None else None,
-        "step": step,
-        "best_lpips": best_lpips,
-        "ema": (ema.shadow if ema is not None else None),
-    }, path)
-
-def load_ckpt(path, model, opt=None, scaler=None):
-    ck = torch.load(path, map_location="cpu")
-    model.load_state_dict(ck["model"], strict=False)
-    if opt is not None and ck.get("optimizer"):
-        opt.load_state_dict(ck["optimizer"])
-    if scaler is not None and ck.get("scaler") is not None:
-        scaler.load_state_dict(ck["scaler"])
-    step = ck.get("step", 0)
-    best_lp = ck.get("best_lpips", 1e9)
-    ema_sd = ck.get("ema", None)
-    return step, best_lp, ema_sd
 
 class WarmupCosine:
     def __init__(self, optimizer, base_lr, warmup_steps, max_steps):
