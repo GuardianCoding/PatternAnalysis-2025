@@ -79,11 +79,35 @@ def main():
     print("Device:", device)
     set_seed(int(cfg.get("seed", 1337)))
 
-    out_root: Path = Path(cfg.get("out_dir", "outputs")) / (args.exp_name or cfg.get("exp_defaults","exp"))
+    exp_base = Path(cfg.get("out_dir", "outputs"))
+    exp_name = args.exp_name or cfg.get("exp_defaults", "exp")
+    ts = time.strftime("%Y%m%d-%H%M%S")  # e.g. 20251022-2038
+    run_name = f"{exp_name}_{ts}"
+    out_root: Path = exp_base / run_name
+
+
     is_main = (not use_ddp) or dist.get_rank() == 0
     if is_main:
         out_root.mkdir(parents=True, exist_ok=True)
-        yaml.safe_dump(cfg, open(out_root/"config_merged.yaml", "w"))
+        # save merged config for reproducibility
+        yaml.safe_dump(cfg, open(out_root / "config_merged.yaml", "w"))
+        # write a small run meta file
+        with open(out_root / "run_meta.txt", "w") as f:
+            cmd = " ".join(os.sys.argv)
+            f.write(f"run_name: {run_name}\n")
+            f.write(f"timestamp: {ts}\n")
+            f.write(f"device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu'}\n")
+            f.write(f"cmd: {cmd}\n")
+        # best-effort symlink to latest run for this exp_name
+        try:
+            latest_link = exp_base / f"{exp_name}_latest"
+            if latest_link.exists() or latest_link.is_symlink():
+                latest_link.unlink()
+            latest_link.symlink_to(out_root.name)  # relative symlink
+        except Exception:
+            # fallback: write a text pointer if symlink not allowed
+            with open(exp_base / f"{exp_name}_latest.txt", "w") as f:
+                f.write(str(out_root.resolve()))
 
     # ------------------stats tracking----------------
     tracker = StatTracker(
