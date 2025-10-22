@@ -1,3 +1,7 @@
+import warnings # Ignore warnings from lpip module
+warnings.filterwarnings("ignore", message=".*pretrained.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*Arguments other than a weight enum.*deprecated.*")
+
 import os, argparse, time
 from pathlib import Path
 import yaml
