@@ -1,4 +1,3 @@
-# utils/train_tracker.py
 # Made with the help of ChatGPT5
 import os
 import csv
@@ -20,7 +19,7 @@ class StatTracker:
     - Records: step, l1, lpips, total_loss, lr, val_lpips
     - Writes: <out_dir>/logs/train_log.csv
     - Plots:  2 panels -> Train (losses/LR) and Validation (LPIPS)
-    - Headless-safe: if backend is Agg, it will save PNGs periodically instead of showing a GUI.
+    - Also writes epoch timing to <out_dir>/logs/epochs_log.csv and total timing to runtime.txt
     """
 
     def __init__(
@@ -33,6 +32,8 @@ class StatTracker:
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.csv_path = self.out_dir / "logs" / "train_log.csv"
+        self.epoch_csv_path = self.out_dir / "logs" / "epochs_log.csv"
+        self.runtime_path = self.out_dir / "runtime.txt"
         self.png_path = self.out_dir / "plots.png"
         self.redraw_every = max(1, int(redraw_every))
         self.is_main = bool(is_main)
@@ -55,6 +56,7 @@ class StatTracker:
 
         # Timing
         self._t0 = time.time()
+        self._run_start_wall = None
         self._last_redraw_step = -10**9
 
         # CSV init
@@ -76,6 +78,36 @@ class StatTracker:
             self._init_plot()
 
     # --------------- public API ---------------
+
+    def start_run(self):
+        """Mark run start and initialize epoch CSV."""
+        if not self.is_main:
+            return
+        self._run_start_wall = time.time()
+        if not self.epoch_csv_path.exists():
+            with open(self.epoch_csv_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["epoch", "duration_sec", "steps", "steps_per_sec", "total_elapsed_sec"])
+
+    def end_run(self, total_duration_sec: float):
+        """Write total runtime."""
+        if not self.is_main:
+            return
+        try:
+            with open(self.runtime_path, "w") as f:
+                f.write(f"total_duration_sec,{total_duration_sec:.6f}\n")
+                f.write(f"total_duration_min,{total_duration_sec/60.0:.6f}\n")
+        except Exception:
+            pass
+
+    def log_epoch(self, epoch: int, duration_sec: float, steps: int, steps_per_sec: float):
+        """Append per-epoch timing to epoch CSV."""
+        if not self.is_main:
+            return
+        elapsed = (time.time() - self._run_start_wall) if self._run_start_wall else duration_sec
+        with open(self.epoch_csv_path, "a", newline="") as f:
+            w = csv.writer(f)
+            w.writerow([int(epoch), float(duration_sec), int(steps), float(steps_per_sec), float(elapsed)])
 
     def log_train(self, step: int, loss_l1: float, loss_lp: float, total_loss: Optional[float], lr: float):
         """Record a training step. total_loss can be None; we’ll compute loss_l1+loss_lp if so."""
@@ -107,7 +139,6 @@ class StatTracker:
         self.val_steps.append(int(step))
         self.val_lp.append(float(avg_lpips))
         if self.is_main:
-            # Add a CSV line with val filled, train columns left as last-known or blank
             self._append_csv(step, "", "", "", "", val_lp=avg_lpips)
             self.redraw(force=True)
 
@@ -121,13 +152,11 @@ class StatTracker:
         self._update_train_axes()
         self._update_val_axes()
 
-        # Tighten and draw
         self.fig.tight_layout()
         if self._headless:
             self.fig.savefig(self.png_path, dpi=150)
         else:
             plt.draw()
-            # a tiny pause to process GUI events; does not stall training
             plt.pause(0.001)
 
         self._last_redraw_step = self.steps[-1] if self.steps else self._last_redraw_step
@@ -148,12 +177,11 @@ class StatTracker:
     # --------------- internals ---------------
 
     def _init_plot(self):
-        plt.ion()  # enable interactive mode (safe if headless; ignored by Agg)
+        plt.ion()
         self.fig = plt.figure(figsize=(10, 5))
         self.ax_train = self.fig.add_subplot(1, 2, 1)
         self.ax_val = self.fig.add_subplot(1, 2, 2)
 
-        # Create persistent line objects (avoid replot overhead)
         (l1_line,) = self.ax_train.plot([], [], label="L1")
         (lp_line,) = self.ax_train.plot([], [], label="LPIPS")
         (tot_line,) = self.ax_train.plot([], [], label="Total")
@@ -177,7 +205,6 @@ class StatTracker:
         self.ax_val.set_ylabel("LPIPS")
         self.ax_val.legend(loc="upper right")
 
-        # First draw so window appears
         if not self._headless:
             plt.draw()
             plt.pause(0.001)
@@ -187,12 +214,10 @@ class StatTracker:
         if not x:
             return
 
-        # choose raw or smoothed for plotting
         l1 = self._series(self.l1, self._ema_l1)
         lp = self._series(self.lp, self._ema_lp)
         tot = self._series(self.tot, self._ema_tot)
 
-        # Scale LR to fit (divide by its max to keep it ~[0,1] then multiply by median(tot) for visibility)
         if self.lr:
             lrmax = max(self.lr)
             scale = max(1e-12, lrmax)
@@ -206,7 +231,6 @@ class StatTracker:
         self.lines["tot"].set_data(x, tot)
         self.lines["lr"].set_data(x, lr_scaled)
 
-        # Update limits
         xmin, xmax = min(x), max(x)
         self.ax_train.set_xlim(xmin, xmax if xmax > xmin else xmin + 1)
 
@@ -220,7 +244,6 @@ class StatTracker:
             pad = 0.05 * (ymax - ymin + 1e-12)
             self.ax_train.set_ylim(ymin - pad, ymax + pad)
 
-        # progress subtitle
         elapsed = time.time() - self._t0
         self.ax_train.set_title(f"Train losses / LR  |  steps={xmax}  |  {elapsed/60.0:.1f} min")
 
@@ -254,7 +277,6 @@ class StatTracker:
     def _series(self, raw_list, ema_value):
         if self.smoothing <= 0 or not raw_list:
             return raw_list
-        # Rebuild smoothed series efficiently from last known EMA
         out = []
         ema = None
         for v in raw_list:

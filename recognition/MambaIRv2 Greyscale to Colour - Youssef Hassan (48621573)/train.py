@@ -92,6 +92,8 @@ def main():
         smoothing=float(cfg.get("plot_smoothing", 0.0)),
         is_main=is_main,
     )
+    if is_main:
+        tracker.start_run()  # mark run start and create epoch CSV
 
     # --------------------- data ---------------------
     train_loader, eval_loader, train_samp, eval_samp = build_coco_dataloaders(
@@ -148,14 +150,22 @@ def main():
     if use_ddp and train_samp is not None:
         train_samp.set_epoch(1)
 
+    train_wall_start = time.time() # total run start (wall)
+
     for epoch in range(1, epochs + 1):
         if use_ddp and train_samp is not None:
             train_samp.set_epoch(epoch)
+
+        # ---- epoch timing start ----
+        epoch_start = time.time()
+        steps_in_epoch = 0
 
         net.train()
         opt.zero_grad(set_to_none=True)
 
         for L, ab, _ in train_loader:
+            steps_in_epoch += 1      # per-epoch step counter
+
             L, ab = L.to(device, non_blocking=True), ab.to(device, non_blocking=True)
 
             with autocast(enabled=bool(cfg.get("amp", True))):
@@ -179,15 +189,12 @@ def main():
             # lightweight log (rank 0 only)
             if is_main and step % int(cfg.get("log_every", 100)) == 0:
                 current_lr = opt.param_groups[0]["lr"]
-                # Log to tracker (total before grad_accum division for human readability)
                 tracker.log_train(step, loss_l1.item(), loss_lp.item(), (loss_l1 + loss_lp).item(), current_lr)
-                # Print to Console
                 print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} lr={opt.param_groups[0]['lr']:.2e}")
 
             # validate (rank 0 only)
             if is_main and step % val_every == 0:
                 net.eval()
-                # swap in EMA weights if available
                 if ema is not None:
                     bak = (net.module if use_ddp else net).state_dict()
                     ema.apply_to(net.module if use_ddp else net)
@@ -202,12 +209,10 @@ def main():
                         lp = lpips_loss(pr, gt).item()
                         lp_sum += lp; n_cnt += 1
                 avg_lp = lp_sum / max(n_cnt, 1)
-                # Logging validation statistics
                 if is_main:
                     tracker.log_val(step, avg_lp)
                 print(f"[val] step={step} LPIPS={avg_lp:.4f}")
 
-                # restore non-EMA
                 if ema is not None:
                     (net.module if use_ddp else net).load_state_dict(bak, strict=False)
                 net.train()
@@ -220,8 +225,20 @@ def main():
             if is_main and step % save_every == 0:
                 save_ckpt(out_root/f"step_{step}.ckpt", net.module if use_ddp else net, opt, scaler, step, best_lp, ema)
 
+        # ---- epoch timing end ----
+        if is_main:
+            epoch_dur = time.time() - epoch_start
+            steps_per_sec = steps_in_epoch / max(epoch_dur, 1e-9)
+            tracker.log_epoch(epoch=epoch, duration_sec=epoch_dur,
+                              steps=steps_in_epoch, steps_per_sec=steps_per_sec)
+            print(f"[epoch {epoch}] duration={epoch_dur:.2f}s  steps={steps_in_epoch}  {steps_per_sec:.2f} steps/s")
+
+    # ---- total timing end ----
     if is_main:
-        tracker.save_fig()  # final snapshot
+        total_dur = time.time() - train_wall_start
+        tracker.end_run(total_duration_sec=total_dur)
+        print(f"[training done] total_wall_time={total_dur/60.0:.2f} min  ({total_dur:.2f}s)")
+        tracker.save_fig()
         tracker.close()
 
     if use_ddp:
