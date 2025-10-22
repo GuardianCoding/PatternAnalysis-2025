@@ -1,7 +1,12 @@
-train_root: /data/train
-val_root: /data/val
-out_dir: outputs
-exp_defaults: mamba_lab
+auto_download: true
+coco_root: ./datasets/coco
+exp_defaults: mamba_results
+
+# Set these if the dataset is already downloaded, and comment out coco_root
+# Set auto_download = false
+# train_root: /dataset/coco/train2017
+# val_root:   /dataset/coco/val2017
+# ann_root:   /dataset/coco/annotations
 
 # training
 epochs: 30
