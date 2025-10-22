@@ -3,17 +3,16 @@ from pathlib import Path
 import yaml
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim import AdamW
 
-from dataset import CocoColorisationTrain, CocoColorisationEval, build_coco_dataloaders
+from dataset import build_coco_dataloaders
 from modules import build_mambairv2_colorizer
 from utils.metrics import set_seed, lab_to_rgb, lpips_loss
+from utils.train_tracker import StatTracker
 
 # --------------------- utilities ---------------------
-
 class EMA:
     def __init__(self, model, decay):
         self.decay = decay
@@ -107,6 +106,14 @@ def main():
         out_root.mkdir(parents=True, exist_ok=True)
         yaml.safe_dump(cfg, open(out_root/"config_merged.yaml", "w"))
 
+    # ------------------stats tracking----------------
+    tracker = StatTracker(
+        out_dir=out_root,
+        redraw_every=int(cfg.get("plot_redraw_every", 50)),
+        smoothing=float(cfg.get("plot_smoothing", 0.0)),
+        is_main=is_main,
+    )
+
     # --------------------- data ---------------------
     train_loader, eval_loader, train_samp, eval_samp = build_coco_dataloaders(
         cfg,
@@ -192,6 +199,10 @@ def main():
 
             # lightweight log (rank 0 only)
             if is_main and step % int(cfg.get("log_every", 100)) == 0:
+                current_lr = opt.param_groups[0]["lr"]
+                # Log to tracker (total before grad_accum division for human readability)
+                tracker.log_train(step, loss_l1.item(), loss_lp.item(), (loss_l1 + loss_lp).item(), current_lr)
+                # Print to Console
                 print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} lr={opt.param_groups[0]['lr']:.2e}")
 
             # validate (rank 0 only)
@@ -212,6 +223,9 @@ def main():
                         lp = lpips_loss(pr, gt).item()
                         lp_sum += lp; n_cnt += 1
                 avg_lp = lp_sum / max(n_cnt, 1)
+                # Logging validation statistics
+                if is_main:
+                    tracker.log_val(step, avg_lp)
                 print(f"[val] step={step} LPIPS={avg_lp:.4f}")
 
                 # restore non-EMA
@@ -226,6 +240,10 @@ def main():
             # periodic checkpoint (rank 0 only)
             if is_main and step % save_every == 0:
                 save_ckpt(out_root/f"step_{step}.ckpt", net.module if use_ddp else net, opt, scaler, step, best_lp, ema)
+
+    if is_main:
+        tracker.save_fig()  # final snapshot
+        tracker.close()
 
     if use_ddp:
         dist.barrier()
