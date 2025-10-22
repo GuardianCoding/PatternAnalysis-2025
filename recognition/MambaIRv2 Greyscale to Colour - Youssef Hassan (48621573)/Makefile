@@ -8,6 +8,7 @@ SHELL := /bin/bash
 .PHONY: setup reinstall clean veryclean dataset
 
 setup:
+	@command -v conda >/dev/null 2>&1 || { echo "[Error] 'conda' not found in PATH"; exit 1; }
 	@echo "[Make] Creating/refreshing conda env '$(ENV_NAME)'..."
 	conda env create -f env.yml || conda env update -f env.yml --prune
 	@echo "[Make] Installing MambaIR into '$(ENV_NAME)'..."
