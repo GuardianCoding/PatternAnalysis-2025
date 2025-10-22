@@ -26,9 +26,3 @@ clean:
 # Remove env + checkout (careful!)
 veryclean: clean
 	conda env remove -n $(ENV_NAME) || true
-
-dataset:
-	@echo "Downloading Dataset..."
-	@chmod +x scripts/download_datasets.sh
-	bash scripts/download_datasets.sh
-	@echo "Datasets downloaded under ./datasets"
