@@ -2,6 +2,7 @@
 # ==============================================================
 # install_mambair.sh
 # Clone/update MambaIR and make it importable via .pth (no build).
+# Downloads latest release assets (model checkpoints).
 # Handles detached HEAD by checking out the remote default branch.
 # ==============================================================
 # Made with the help of ChatGPT5
@@ -10,6 +11,7 @@ set -euo pipefail
 
 TARGET_DIR="external/MambaIR"
 REPO_URL="https://github.com/csguoh/MambaIR"
+CHECKPOINTS_DIR="checkpoints"
 
 echo "[Setup] Preparing MambaIR from ${REPO_URL}"
 
@@ -49,6 +51,50 @@ git -C "$TARGET_DIR" pull --ff-only --quiet
 LATEST_COMMIT="$(git -C "$TARGET_DIR" rev-parse HEAD)"
 echo "[Info] Using commit: $LATEST_COMMIT on branch: $DEFAULT_BRANCH"
 
+# Download latest release assets (model checkpoints)
+echo "[Release] Fetching latest release information..."
+mkdir -p "$CHECKPOINTS_DIR"
+
+# Get latest release info using GitHub API (no auth required for public repos)
+RELEASE_INFO=$(curl -sL "https://api.github.com/repos/csguoh/MambaIR/releases/latest" || echo "")
+
+if [ -n "$RELEASE_INFO" ] && echo "$RELEASE_INFO" | grep -q '"tag_name"'; then
+  RELEASE_TAG=$(echo "$RELEASE_INFO" | grep '"tag_name"' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
+  echo "[Release] Found latest release: $RELEASE_TAG"
+  
+  # Extract download URLs for assets
+  ASSET_URLS=$(echo "$RELEASE_INFO" | grep '"browser_download_url"' | sed -E 's/.*"browser_download_url": "([^"]+)".*/\1/')
+  
+  if [ -n "$ASSET_URLS" ]; then
+    echo "[Download] Downloading model checkpoints to ${CHECKPOINTS_DIR}/"
+    
+    # Download each asset
+    while IFS= read -r url; do
+      if [ -n "$url" ]; then
+        filename=$(basename "$url")
+        output_path="${CHECKPOINTS_DIR}/${filename}"
+        
+        # Skip if already downloaded
+        if [ -f "$output_path" ]; then
+          echo "[Skip] ${filename} already exists"
+        else
+          echo "[Downloading] ${filename}..."
+          curl -L --progress-bar -o "$output_path" "$url"
+          echo "[Downloaded] ${filename}"
+        fi
+      fi
+    done <<< "$ASSET_URLS"
+    
+    echo "[Release] All checkpoints downloaded to ${CHECKPOINTS_DIR}/"
+  else
+    echo "[Warning] No assets found in latest release"
+  fi
+else
+  echo "[Warning] Could not fetch release info. Skipping checkpoint download."
+  echo "          You may need to download checkpoints manually from:"
+  echo "          ${REPO_URL}/releases/latest"
+fi
+
 # Patch missing VERSION file (harmless for .pth mode)
 if [ ! -f "$TARGET_DIR/VERSION" ]; then
   echo "0.0.0" > "$TARGET_DIR/VERSION"
@@ -87,4 +133,5 @@ echo "[Link] Wrote ${PTH_FILE} -> ${REPO_ABS_PATH}"
 export BASICSR_EXT=False
 
 echo "[Done] MambaIR is importable via .pth."
+echo "       Checkpoints available in: ${CHECKPOINTS_DIR}/"
 echo "       Test: conda run -n mamba-colour python -c 'import sys;import mambair,os;print(\"ok\", os.path.exists(\"${REPO_ABS_PATH}/VERSION\"))'"
