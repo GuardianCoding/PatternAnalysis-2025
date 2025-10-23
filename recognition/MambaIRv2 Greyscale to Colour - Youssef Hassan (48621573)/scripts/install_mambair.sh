@@ -122,6 +122,8 @@ if [ -z "${SITE_PACKAGES:-}" ]; then
   exit 1
 fi
 
+pip uninstall -y basicsr || true
+
 # Write a .pth file so Python adds the repo root to sys.path
 PTH_FILE="${SITE_PACKAGES}/mambair_local.pth"
 # Use absolute path
