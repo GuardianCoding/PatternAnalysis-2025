@@ -185,7 +185,7 @@ class CocoColorisationEval(Dataset):
                  crop_size: int = 256):
         super().__init__()
         _require_pycoco()
-        self.ds = CocoDetection(img_root=img_root, annFile=ann_file)
+        self.ds = CocoDetection(root=img_root, annFile=ann_file)
         self.crop_size = int(crop_size)
 
     def __len__(self): return len(self.ds)
