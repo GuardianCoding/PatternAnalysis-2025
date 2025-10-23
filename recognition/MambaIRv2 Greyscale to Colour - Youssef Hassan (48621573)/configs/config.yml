@@ -33,10 +33,10 @@ rgb_jitter_strength: 0.1
 
 # model
 model:
-  variant:     # for logging only
+  variant: MambaIRv2    # for logging only
   embed_dim: 96
   depths: [4,4,6,4]
 
 # ckpt
-pretrained:
+pretrained: checkpoints/mambairv2_ColorDN_15.pth
 resume: null
