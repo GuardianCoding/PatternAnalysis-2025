@@ -130,7 +130,7 @@ class CocoColorisationTrain(Dataset):
                  longside_scale_range: Tuple[float, float] = (1.00, 1.15)):
         super().__init__()
         _require_pycoco()
-        self.ds = CocoDetection(img_root=img_root, annFile=ann_file)
+        self.ds = CocoDetection(root=img_root, annFile=ann_file)
         self.crop_size = int(crop_size)
         self.hflip = bool(hflip)
         self.rgb_jitter_prob = float(rgb_jitter_prob)
