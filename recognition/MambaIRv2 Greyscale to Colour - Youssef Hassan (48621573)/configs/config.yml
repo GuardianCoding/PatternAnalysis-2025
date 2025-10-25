@@ -34,7 +34,7 @@ rgb_jitter_strength: 0.1
 # model
 model:
   variant: MambaIRv2    # for logging only
-  embed_dim: 96
+  embed_dim: 174
   depths: [4,4,6,4]
 
 # ckpt
