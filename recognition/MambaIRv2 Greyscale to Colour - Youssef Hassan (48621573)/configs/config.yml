@@ -36,6 +36,7 @@ model:
   variant: MambaIRv2    # for logging only
   embed_dim: 174
   depths: [4,4,6,4]
+  num_heads: [6,6,6,6]
 
 # ckpt
 pretrained: checkpoints/mambairv2_ColorDN_15.pth
