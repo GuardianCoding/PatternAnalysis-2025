@@ -85,14 +85,6 @@ def ssim_on_tensors(a01: torch.Tensor, b01: torch.Tensor) -> float:
     b = tensor01_to_uint8_img(b01)
     return float(ssim_metric(a, b, channel_axis=2, data_range=255))
 
-def load_ckpt_into(model: torch.nn.Module, ckpt_path: str):
-    sd = torch.load(ckpt_path, map_location="cpu")
-    if isinstance(sd, dict) and "model" in sd:
-        sd = sd["model"]
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    print(f"[ckpt] loaded: {ckpt_path}\n       missing={len(missing)}, unexpected={len(unexpected)}, strict=False")
-
-
 # ------------------ main ------------------
 
 def main():
@@ -144,18 +136,23 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Build model shell and load trained ckpt
-    embed_dim = cfg.get("model", {}).get("embed_dim", 180)
-    depths    = cfg.get("model", {}).get("depths", [4,4,6,4])
-    num_heads = cfg.get("model",{}).get("num_heads", [6,6,6,6])
     net = build_mambairv2_colorizer(
-        embed_dim=embed_dim,
-        num_heads=num_heads,
-        depths=tuple(depths),
-        pretrained=None,
+        upscale=int(cfg["model"]["upscale"]),
+        in_chans=int(cfg["model"]["in_chans"]),
+        img_size=int(cfg["model"]["img_size"]),
+        img_range=float(cfg["model"]["img_range"]),
+        embed_dim=cfg["model"]["embed_dim"],
+        d_state=int(cfg["model"]["d_state"]),
+        depths=tuple(cfg["model"]["depths"]),
+        num_heads=tuple(cfg["model"]["num_heads"]),
+        window_size=int(cfg["model"]["window_size"]),
+        inner_rank=int(cfg["model"]["inner_rank"]),
+        num_tokens=int(cfg["model"]["num_tokens"]),
+        convffn_kernel_size=int(cfg["model"]["convffn_kernel_size"]),
+        mlp_ratio=float(cfg["model"]["mlp_ratio"]),
+        pretrained=cfg.get("pretrained"),
         device=device
     ).eval()
-
-    load_ckpt_into(net, ckpt_path)
 
     have_gt = gt_root is not None and os.path.isdir(gt_root)
     lpips_list, psnr_list, ssim_list, names = [], [], [], []

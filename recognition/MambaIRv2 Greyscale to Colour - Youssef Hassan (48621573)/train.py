@@ -11,12 +11,18 @@ from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim import AdamW
+import torch.nn.functional as F
 
 from dataset import build_coco_dataloaders
 from modules import build_mambairv2_colorizer
 from utils.metrics import set_seed, lpips_loss
 from utils.train_tracker import StatTracker
 from utils.checkpoint_io import save_ckpt, load_ckpt
+
+# Memory savings
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_float32_matmul_precision("medium")
+torch.backends.cudnn.benchmark = True
 
 # --------------------- utilities ---------------------
 class EMA:
@@ -132,14 +138,26 @@ def main():
 
     # --------------------- model ---------------------
     net = build_mambairv2_colorizer(
+        upscale=int(cfg["model"]["upscale"]),
+        in_chans=int(cfg["model"]["in_chans"]),
+        img_size=int(cfg["model"]["img_size"]),
+        img_range=float(cfg["model"]["img_range"]),
         embed_dim=cfg["model"]["embed_dim"],
+        d_state=int(cfg["model"]["d_state"]),
         depths=tuple(cfg["model"]["depths"]),
         num_heads=tuple(cfg["model"]["num_heads"]),
+        window_size=int(cfg["model"]["window_size"]),
+        inner_rank=int(cfg["model"]["inner_rank"]),
+        num_tokens=int(cfg["model"]["num_tokens"]),
+        convffn_kernel_size=int(cfg["model"]["convffn_kernel_size"]),
+        mlp_ratio=float(cfg["model"]["mlp_ratio"]),
         pretrained=cfg.get("pretrained"),
         device=device
     )
     if use_ddp:
         net = DDP(net, device_ids=[torch.cuda.current_device()], find_unused_parameters=False)
+
+    torch.cuda.reset_peak_memory_stats() # More memory checking
 
     # --------------------- losses/optim/sched ---------------------
     def charbonnier(x, y, eps=1e-3):
@@ -175,6 +193,7 @@ def main():
     save_every = int(cfg.get("save_every", 2000))
     val_every  = int(cfg.get("val_every", 1000))
     epochs     = int(cfg.get("epochs", 10))
+    lpips_side = int(cfg.get("lpips_side", min(int(cfg.get("crop_size", 128)), 192)))
 
     if use_ddp and train_samp is not None:
         train_samp.set_epoch(1)
@@ -195,13 +214,15 @@ def main():
         for x_in, y_tgt, _ in train_loader:
             steps_in_epoch += 1      # per-epoch step counter
 
-            x_in  = x_in.to(device, non_blocking=True)    # [B,3,H,W] grayscale replicated
-            y_tgt = y_tgt.to(device, non_blocking=True)   # [B,3,H,W] true color
+            x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
+            y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
 
             with autocast(enabled=bool(cfg.get("amp", True))):
                 pred_rgb = net(x_in)
-                loss_l1 = charbonnier(pred_rgb - y_tgt) * float(cfg.get("lambda_l1", 1.0))
-                loss_lp  = lpips_loss(pred_rgb, y_tgt) * float(cfg.get("lambda_lpips", 1.0))
+                loss_l1  = charbonnier(pred_rgb - y_tgt)
+                pr_s = F.interpolate(pred_rgb,  size=lpips_side, mode="bilinear", align_corners=False)
+                gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
+                loss_lp = lpips_loss(pr_s, gt_s)
                 loss = (loss_l1 + loss_lp) / grad_accum
 
             scaler.scale(loss).backward()
@@ -254,6 +275,9 @@ def main():
             # periodic checkpoint (rank 0 only)
             if is_main and step % save_every == 0:
                 save_ckpt(out_root/f"step_{step}.ckpt", net.module if use_ddp else net, opt, scaler, step, best_lp, ema)
+
+            if step % 25 == 0:
+                torch.cuda.empty_cache()
 
         # ---- epoch timing end ----
         if is_main:

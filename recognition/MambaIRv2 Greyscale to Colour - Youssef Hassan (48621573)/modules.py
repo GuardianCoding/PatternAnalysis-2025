@@ -35,9 +35,19 @@ except Exception as e:
 # --------- public factory ---------
 
 def build_mambairv2_colorizer(
+    upscale: int = 1,
+    in_chans: int = 3,
+    img_size: int = 128,
+    img_range: float = 1.,
     embed_dim: int = 174,
+    d_state: int = 16,
     depths: Tuple[int, ...] = (4, 4, 6, 4),
     num_heads: Tuple[int, ...] = (6, 6, 6, 6),
+    window_size: int = 16,
+    inner_rank: int = 64,
+    num_tokens: int = 128,
+    convffn_kernel_size: int = 5,
+    mlp_ratio: float = 2.,
     pretrained: Optional[str] = None,
     device: Optional[torch.device] = None
 ) -> nn.Module:
@@ -53,18 +63,34 @@ def build_mambairv2_colorizer(
         )
 
     net = MambaIRv2(
-        img_size=64,
-        patch_size=1,
-        in_chans=3,
+        upscale=upscale,
+        in_chans=in_chans,
+        img_size=img_size,
+        img_range=img_range,
+        d_state=d_state,
+        window_size=window_size,
+        inner_rank=inner_rank,
+        num_tokens=num_tokens,
+        convffn_kernel_size=convffn_kernel_size,
+        mlp_ratio=mlp_ratio,
         embed_dim=embed_dim,
         depths=list(depths),
         num_heads=list(num_heads),
-        use_checkpoint=pretrained,
+        use_checkpoint=True,
     )
+
+    if pretrained:
+        sd = torch.load(pretrained, map_location='cpu')
+    if isinstance(sd, dict):
+        for k in ("state_dict","params","network_g","model"):
+            if k in sd and isinstance(sd[k], dict):
+                sd = sd[k]; break
+    missing, unexpected = net.load_state_dict(sd, strict=True)
+    print(f"[pretrained] loaded strict=True  missing={len(missing)}  unexpected={len(unexpected)}")
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    return net.to(device)
+    return net.to(device, memory_format=torch.channels_last)
 
 
 # --------- quick self-test (optional) ---------
