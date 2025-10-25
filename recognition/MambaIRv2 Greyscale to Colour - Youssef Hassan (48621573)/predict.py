@@ -144,10 +144,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Build model shell and load trained ckpt
-    embed_dim = cfg.get("model", {}).get("embed_dim", 174)
+    embed_dim = cfg.get("model", {}).get("embed_dim", 180)
     depths    = cfg.get("model", {}).get("depths", [4,4,6,4])
+    num_heads = cfg.get("model",{}).get("num_heads", [6,6,6,6])
     net = build_mambairv2_colorizer(
         embed_dim=embed_dim,
+        num_heads=num_heads,
         depths=tuple(depths),
         pretrained=None,
         device=device

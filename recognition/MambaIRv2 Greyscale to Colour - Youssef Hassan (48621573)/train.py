@@ -134,6 +134,7 @@ def main():
     net = build_mambairv2_colorizer(
         embed_dim=cfg["model"]["embed_dim"],
         depths=tuple(cfg["model"]["depths"]),
+        num_heads=tuple(cfg["model"]["num_heads"]),
         pretrained=cfg.get("pretrained"),
         device=device
     )
