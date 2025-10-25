@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 import os
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -32,84 +32,6 @@ except Exception as e:
     MambaIRv2 = None
     _HAVE_MAMBAIR = False
     _IMPORT_ERR = e
-
-
-# --------- helpers: replace first/last conv to 1-in / 2-out (warm-start when possible) ---------
-
-def _find_first_conv(module: nn.Module) -> nn.Conv2d:
-    for m in module.modules():
-        if isinstance(m, nn.Conv2d):
-            return m
-    raise RuntimeError("Could not find a Conv2d input stem in the MambaIRv2 model.")
-
-def _find_last_conv(module: nn.Module) -> nn.Conv2d:
-    last = None
-    for m in module.modules():
-        if isinstance(m, nn.Conv2d):
-            last = m
-    if last is None:
-        raise RuntimeError("Could not find a Conv2d output head in the MambaIRv2 model.")
-    return last
-
-def _replace_module(root: nn.Module, old: nn.Module, new: nn.Module) -> bool:
-    """Recursively replace a submodule instance."""
-    for name, child in root.named_children():
-        if child is old:
-            setattr(root, name, new)
-            return True
-        if _replace_module(child, old, new):
-            return True
-    return False
-
-@torch.no_grad()
-def adapt_io_for_project(model: nn.Module) -> None:
-    """
-    After loading the ColorDN checkpoint (3-in/3-out), switch:
-      - first conv to in_ch=1 (L)
-      - last  conv to out_ch=2 (a,b)
-    Keep everything else intact.
-    """
-    # ----- input stem: 1-in -----
-    stem = _find_first_conv(model)
-    old_w = stem.weight.data  # [C_out, C_in, k, k]
-    new_stem = nn.Conv2d(
-        in_channels=1,
-        out_channels=old_w.shape[0],
-        kernel_size=stem.kernel_size,
-        stride=stem.stride,
-        padding=stem.padding,
-        dilation=stem.dilation,
-        bias=(stem.bias is not None),
-        groups=stem.groups
-    )
-    # If the pretrained was RGB (C_in=3), average weights across channels to warm-start grayscale.
-    if old_w.shape[1] == 3:
-        new_stem.weight.copy_(old_w.mean(dim=1, keepdim=True))
-    else:
-        # Fallback: copy first channel
-        new_stem.weight.copy_(old_w[:, :1])
-    if stem.bias is not None:
-        new_stem.bias.copy_(stem.bias.data)
-    _replace_module(model, stem, new_stem)
-
-    # ----- output head: 2-out -----
-    head = _find_last_conv(model)
-    new_head = nn.Conv2d(
-        in_channels=head.in_channels,
-        out_channels=2,
-        kernel_size=head.kernel_size,
-        stride=head.stride,
-        padding=head.padding,
-        dilation=head.dilation,
-        bias=(head.bias is not None),
-        groups=head.groups
-    )
-    # Fresh init for the 2 output channels
-    nn.init.kaiming_normal_(new_head.weight, nonlinearity="linear")
-    if new_head.bias is not None:
-        nn.init.zeros_(new_head.bias)
-    _replace_module(model, head, new_head)
-
 
 # --------- helpers: checkpoint loader ---------
 
@@ -156,11 +78,8 @@ def build_mambairv2_colorizer(
     # official 3-in/3-out weights first and only then adapt IO to 1/2.
     net = MambaIRv2(embed_dim=embed_dim, depths=list(depths))  # repo signature. :contentReference[oaicite:2]{index=2}
 
-    # 1) load ColorDN_15 (3->3) weights into the backbone
+    # Load ColorDN_15 (3->3) weights into the backbone
     load_color_dn15_weights(net, pretrained)
-
-    # 2) swap I/O to L->ab
-    adapt_io_for_project(net)
 
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

@@ -14,7 +14,7 @@ from torch.optim import AdamW
 
 from dataset import build_coco_dataloaders
 from modules import build_mambairv2_colorizer
-from utils.metrics import set_seed, lab_to_rgb, lpips_loss
+from utils.metrics import set_seed, lpips_loss
 from utils.train_tracker import StatTracker
 from utils.checkpoint_io import save_ckpt, load_ckpt
 
@@ -191,17 +191,16 @@ def main():
         net.train()
         opt.zero_grad(set_to_none=True)
 
-        for L, ab, _ in train_loader:
+        for x_in, y_tgt, _ in train_loader:
             steps_in_epoch += 1      # per-epoch step counter
 
-            L, ab = L.to(device, non_blocking=True), ab.to(device, non_blocking=True)
+            x_in  = x_in.to(device, non_blocking=True)    # [B,3,H,W] grayscale replicated
+            y_tgt = y_tgt.to(device, non_blocking=True)   # [B,3,H,W] true color
 
             with autocast(enabled=bool(cfg.get("amp", True))):
-                pred_ab = net(L)
-                loss_l1 = charbonnier(pred_ab, ab) * float(cfg.get("lambda_l1", 1.0))
-                pred_rgb = lab_to_rgb(L, pred_ab)
-                tgt_rgb  = lab_to_rgb(L, ab)
-                loss_lp  = lpips_loss(pred_rgb, tgt_rgb) * float(cfg.get("lambda_lpips", 1.0))
+                pred_rgb = net(x_in)
+                loss_l1 = charbonnier(pred_rgb - y_tgt) * float(cfg.get("lambda_l1", 1.0))
+                loss_lp  = lpips_loss(pred_rgb, y_tgt) * float(cfg.get("lambda_lpips", 1.0))
                 loss = (loss_l1 + loss_lp) / grad_accum
 
             scaler.scale(loss).backward()
@@ -227,19 +226,21 @@ def main():
                     bak = (net.module if use_ddp else net).state_dict()
                     ema.apply_to(net.module if use_ddp else net)
 
-                lp_sum, n_cnt = 0.0, 0
+                val_l1, val_lp, n_count = 0.0, 0.0, 0
                 with torch.no_grad():
-                    for Lv, abv, _names in eval_loader:
-                        Lv, abv = Lv.to(device, non_blocking=True), abv.to(device, non_blocking=True)
-                        pab = net(Lv)
-                        pr = lab_to_rgb(Lv, pab)
-                        gt = lab_to_rgb(Lv, abv)
-                        lp = lpips_loss(pr, gt).item()
-                        lp_sum += lp; n_cnt += 1
-                avg_lp = lp_sum / max(n_cnt, 1)
+                    for x_in, y_tgt, _ in eval_loader:
+                        x_in  = x_in.to(device)
+                        y_tgt = y_tgt.to(device)
+                        pred_rgb = net(x_in)
+                        val_l1  += charbonnier(pred_rgb - y_tgt).item()
+                        val_lp  += lpips_loss(pred_rgb, y_tgt).item()
+                        n_count += 1
+
+                avg_l1 = val_l1 / max(n_count, 1)
+                avg_lp = val_lp / max(n_count, 1)
                 if is_main:
                     tracker.log_val(step, avg_lp)
-                print(f"[val] step={step} LPIPS={avg_lp:.4f}")
+                print(f"[val] step={step} CHARBONNIER={avg_l1:.4f} LPIPS={avg_lp:.4f}")
 
                 if ema is not None:
                     (net.module if use_ddp else net).load_state_dict(bak, strict=False)

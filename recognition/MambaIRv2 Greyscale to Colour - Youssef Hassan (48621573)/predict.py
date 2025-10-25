@@ -28,6 +28,7 @@ from PIL import Image
 
 import torch
 import torchvision.transforms as T
+from torchvision.transforms import functional as F
 from torchvision.utils import save_image, make_grid
 from skimage.metrics import structural_similarity as ssim_metric
 import pandas as pd
@@ -69,13 +70,11 @@ def collect_images(root: str):
         files += glob(os.path.join(root, "**", e), recursive=True)
     return sorted(files)
 
-def rgb_pil_to_L_tensor(rgb_pil: Image.Image) -> torch.Tensor:
-    to_t = T.ToTensor()
-    rgb = to_t(rgb_pil).unsqueeze(0)  # (1,3,H,W) in [0,1]
-    import kornia
-    lab = kornia.color.rgb_to_lab(rgb)
-    L = lab[:, :1] / 100.0
-    return L
+def rgb_pil_to_gray3_tensor(rgb_pil: Image.Image) -> torch.Tensor:
+    """PIL RGB -> (1,3,H,W) grayscale replicated to 3 channels, in [0,1]."""
+    gray3_pil = F.rgb_to_grayscale(rgb_pil, num_output_channels=3)
+    x = T.ToTensor()(gray3_pil).unsqueeze(0)  # (1,3,H,W)
+    return x
 
 def tensor01_to_uint8_img(t: torch.Tensor) -> np.ndarray:
     arr = (t.squeeze(0).permute(1,2,0).clamp(0,1).cpu().numpy() * 255.0).round().astype(np.uint8)
@@ -91,7 +90,7 @@ def load_ckpt_into(model: torch.nn.Module, ckpt_path: str):
     if isinstance(sd, dict) and "model" in sd:
         sd = sd["model"]
     missing, unexpected = model.load_state_dict(sd, strict=False)
-    print(f"[ckpt] loaded: {ckpt_path}\n       missing={len(missing)}, unexpected={len(unexpected)}")
+    print(f"[ckpt] loaded: {ckpt_path}\n       missing={len(missing)}, unexpected={len(unexpected)}, strict=False")
 
 
 # ------------------ main ------------------
@@ -144,8 +143,8 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Build model shell (no pretrained here) and load trained ckpt
-    embed_dim = cfg.get("model", {}).get("embed_dim", 96)
+    # Build model shell and load trained ckpt
+    embed_dim = cfg.get("model", {}).get("embed_dim", 174)
     depths    = cfg.get("model", {}).get("depths", [4,4,6,4])
     net = build_mambairv2_colorizer(
         embed_dim=embed_dim,
@@ -163,19 +162,17 @@ def main():
     with torch.inference_mode(), autocast_ctx():
         for i, p in enumerate(files, 1):
             name = os.path.basename(p)
-            # Load input image (RGB for consistent Lab conversion)
+            # Load input image (RGB), then convert to 3-ch grayscale for the model
             rgb_pil = Image.open(p).convert("RGB")
-            L = rgb_pil_to_L_tensor(rgb_pil).to(device)  # (1,1,H,W)
-            pred_ab = net(L)                              # (1,2,H,W)
-            pred_rgb = lab_to_rgb(L, pred_ab)            # (1,3,H,W) in [0,1]
+            x_in = rgb_pil_to_gray3_tensor(rgb_pil).to(device)  # (1,3,H,W)
+            pred_rgb = net(x_in).clamp(0, 1)                    # (1,3,H,W) in [0,1]
 
             # Save colorized image
             save_image(pred_rgb, color_dir / name)
 
             # Build panel
-            L_rgb = L.repeat(1,3,1,1).clamp(0,1)
-            imgs = [L_rgb, pred_rgb]
-            titles = ["L", "Pred"]
+            imgs = [x_in.clamp(0,1), pred_rgb]
+            titles = ["Gray", "Pred"]
 
             # Optional metrics vs GT
             if have_gt:
@@ -189,15 +186,15 @@ def main():
                     W = min(gt.shape[3], pred_rgb.shape[3])
                     gt = gt[:, :, :H, :W]
                     pr = pred_rgb[:, :, :H, :W]
-                    l3 = L_rgb[:, :, :H, :W]
+                    gx = x_in[:, :, :H, :W]
 
                     lp = float(lpips_loss(pr, gt).item())
                     ps = float(psnr_fn(pr, gt))
                     ss = float(ssim_on_tensors(pr, gt))
                     lpips_list.append(lp); psnr_list.append(ps); ssim_list.append(ss); names.append(name)
 
-                    imgs = [l3, pr, gt]
-                    titles = ["L", "Pred", "GT"]
+                    imgs = [gx, pr, gt]
+                    titles = ["Gray", "Pred", "GT"]
                     print(f"[{i:04d}/{len(files)}] {name}  LPIPS={lp:.4f}  PSNR={ps:.2f}  SSIM={ss:.4f}")
                 else:
                     print(f"[{i:04d}/{len(files)}] {name}  (no GT match)")

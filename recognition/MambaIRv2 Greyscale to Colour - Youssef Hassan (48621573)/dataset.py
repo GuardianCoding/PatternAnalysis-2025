@@ -1,5 +1,5 @@
 # dataset.py
-import os, random, shutil, zipfile
+import os, random, zipfile
 from typing import Tuple, Optional, Dict
 import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
@@ -8,7 +8,6 @@ import torchvision.transforms.functional as F
 from torchvision import transforms
 from torchvision.datasets.utils import download_url
 from PIL import Image
-import kornia
 
 __all__ = [
     "CocoColorisationTrain",
@@ -110,12 +109,20 @@ def _random_longside_resize(img: Image.Image, target: int, scale_range: Tuple[fl
         new_h, new_w = long_side, int(w * long_side / h + 0.5)
     return img.resize((new_w, new_h), Image.BICUBIC)
 
-def _to_L_ab(img_rgb: Image.Image):
-    rgb = F.to_tensor(img_rgb).unsqueeze(0)          # (1,3,H,W)
-    lab = kornia.color.rgb_to_lab(rgb)               # L [0,100], ab ~ [-128,127]
-    L   = lab[:, :1] / 100.0
-    ab  = lab[:, 1:] / 128.0
-    return L.squeeze(0), ab.squeeze(0)
+# --- RGB→RGB colorization I/O helper -----------------------------------------
+@torch.no_grad()
+def _to_gray3_and_rgb(img_rgb: Image.Image):
+    """
+    PIL RGB -> (gray3, rgb) tensors
+        gray3: [3,H,W] in [0,1] (grayscale replicated to 3 channels)
+        rgb:   [3,H,W] in [0,1] (ground-truth color)
+    """
+    # target: ground-truth color
+    rgb = F.to_tensor(img_rgb).contiguous()          # [3,H,W], float32, [0,1]
+    # input: grayscale replicated to 3 channels (model expects 3-ch input)
+    gray3_pil = F.rgb_to_grayscale(img_rgb, num_output_channels=3)
+    gray3 = F.to_tensor(gray3_pil).contiguous()      # [3,H,W], float32, [0,1]
+    return gray3, rgb
 
 # ------------------------ datasets ------------------------
 
@@ -171,11 +178,14 @@ class CocoColorisationTrain(Dataset):
         if random.random() < self.rgb_jitter_prob:
             img = self._jitter_rgb(img)
 
-        L, ab = _to_L_ab(img)
+        # convert to (gray3 input, rgb target) tensors
+        x_in, y_tgt = _to_gray3_and_rgb(img)         # [3,H,W], [3,H,W]
 
         img_id = self.ds.ids[idx]
+
         file_name = self.ds.coco.loadImgs(img_id)[0]["file_name"]
-        return L, ab, file_name
+        
+        return x_in, y_tgt, file_name
 
 
 class CocoColorisationEval(Dataset):
@@ -197,11 +207,14 @@ class CocoColorisationEval(Dataset):
         img = _resize_min_side(img, self.crop_size)
         img = F.center_crop(img, [self.crop_size, self.crop_size])
 
-        L, ab = _to_L_ab(img)
+        # convert to (gray3 input, rgb target) tensors
+        x_in, y_tgt = _to_gray3_and_rgb(img)
 
         img_id = self.ds.ids[idx]
+        
         file_name = self.ds.coco.loadImgs(img_id)[0]["file_name"]
-        return L, ab, file_name
+        
+        return x_in, y_tgt, file_name
 
 # ------------------------ dataloader factory ------------------------
 
