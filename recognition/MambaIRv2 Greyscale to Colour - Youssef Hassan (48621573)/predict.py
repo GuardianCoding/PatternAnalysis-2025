@@ -34,7 +34,7 @@ from skimage.metrics import structural_similarity as ssim_metric
 import pandas as pd
 
 from modules import build_mambairv2_colorizer
-from utils.metrics import lab_to_rgb, lpips_loss, psnr as psnr_fn
+from utils.metrics import lpips_loss, psnr as psnr_fn
 
 
 # ------------------ helpers ------------------

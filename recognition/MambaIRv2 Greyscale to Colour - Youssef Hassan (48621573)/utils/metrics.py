@@ -11,11 +11,6 @@ def set_seed(seed):
     import random, numpy as np
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
-def lab_to_rgb(L, ab):
-    lab = torch.cat([L*100.0, ab*128.0], dim=1).clamp_min(0.0)
-    rgb = kornia.color.lab_to_rgb(lab)
-    return rgb.clamp(0,1)
-
 def psnr(a, b):
     mse = F.mse_loss(a, b).item()
     return 99.0 if mse == 0 else 10*log10(1.0/mse)
