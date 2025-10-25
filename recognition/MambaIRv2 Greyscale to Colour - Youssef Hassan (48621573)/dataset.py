@@ -5,8 +5,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torchvision.datasets import CocoDetection
 import torchvision.transforms.functional as F
-from torchvision.transforms import InterpolationMode
-from torchvision.datasets.utils import download_url, download_and_extract_archive
+from torchvision import transforms
+from torchvision.datasets.utils import download_url
 from PIL import Image
 import kornia
 
@@ -162,7 +162,7 @@ class CocoColorisationTrain(Dataset):
         img = _random_longside_resize(img, self.crop_size, self.scale_range)
         img = _resize_min_side(img, self.crop_size)
 
-        i, j, h, w = F.get_params(img, output_size=(self.crop_size, self.crop_size))
+        i, j, h, w = transforms.RandomCrop.get_params(img, output_size=(self.crop_size, self.crop_size))
         img = F.crop(img, i, j, self.crop_size, self.crop_size)
 
         if self.hflip and random.random() < 0.5:
@@ -258,6 +258,7 @@ def build_coco_dataloaders(
         ann_root   = cfg.get("ann_root",   "./datasets/coco/annotations")
 
     crop_size  = int(cfg.get("crop_size", 256))
+    assert crop_size % 16 == 0, f"crop_size={crop_size} should be divisible by 16 for stable down/upsampling"
 
     train_ds = CocoColorisationTrain(
         img_root=train_root,
