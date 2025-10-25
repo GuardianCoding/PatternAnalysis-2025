@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-import kornia
 from math import log10
 import lpips
 

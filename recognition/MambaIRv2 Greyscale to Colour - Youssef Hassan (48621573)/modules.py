@@ -17,7 +17,6 @@
 #   and hosts pretrained weights on HF. :contentReference[oaicite:1]{index=1}
 
 from __future__ import annotations
-import os
 from typing import Tuple, Optional
 
 import torch
