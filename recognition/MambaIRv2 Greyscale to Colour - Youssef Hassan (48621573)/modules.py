@@ -111,27 +111,7 @@ def adapt_io_for_project(model: nn.Module) -> None:
     _replace_module(model, head, new_head)
 
 
-# --------- helpers: robust checkpoint loader for repo formats ---------
-
-def _unwrap_state_dict(sd: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-    """
-    Accepts various formats the repo/BasicSR may save:
-      - {'state_dict': {...}}
-      - {'params': {...}}
-      - {'network_g': {...}}
-      - or a plain state dict
-    Also strip 'module.' prefixes if present.
-    """
-    if isinstance(sd, dict):
-        if 'state_dict' in sd and isinstance(sd['state_dict'], dict):
-            sd = sd['state_dict']
-        elif 'params' in sd and isinstance(sd['params'], dict):
-            sd = sd['params']
-        elif 'network_g' in sd and isinstance(sd['network_g'], dict):
-            sd = sd['network_g']
-    # remove DistributedDataParallel wrapper prefixes
-    sd = {k.replace('module.', '', 1) if k.startswith('module.') else k: v for k, v in sd.items()}
-    return sd
+# --------- helpers: checkpoint loader ---------
 
 def load_color_dn15_weights(model: nn.Module, ckpt_path: Optional[str]) -> None:
     """
@@ -145,7 +125,6 @@ def load_color_dn15_weights(model: nn.Module, ckpt_path: Optional[str]) -> None:
         print(f"[pretrained] Checkpoint not found at: {ckpt_path}")
         return
     sd = torch.load(ckpt_path, map_location='cpu')
-    sd = _unwrap_state_dict(sd)
     missing, unexpected = model.load_state_dict(sd, strict=False)
     print(f"[pretrained] loaded with missing={len(missing)}, unexpected={len(unexpected)}")
 
@@ -153,7 +132,7 @@ def load_color_dn15_weights(model: nn.Module, ckpt_path: Optional[str]) -> None:
 # --------- public factory ---------
 
 def build_mambairv2_colorizer(
-    embed_dim: int = 96,
+    embed_dim: int = 174,
     depths: Tuple[int, ...] = (4, 4, 6, 4),
     pretrained: Optional[str] = None,
     device: Optional[torch.device] = None
