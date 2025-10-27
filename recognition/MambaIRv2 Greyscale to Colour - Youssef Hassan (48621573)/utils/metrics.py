@@ -14,6 +14,19 @@ def psnr(a, b):
     mse = F.mse_loss(a, b).item()
     return 99.0 if mse == 0 else 10*log10(1.0/mse)
 
-def lpips_loss(a, b):
-    with torch.no_grad():
-        return _lpips(a*2-1, b*2-1).mean()
+def _lpips_device():
+    # current device of the LPIPS module
+    try:
+        return next(_lpips.parameters()).device
+    except StopIteration:
+        return torch.device('cpu')
+
+def lpips_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """
+    a, b expected in [0,1]. We move inputs to the LPIPS module's device
+    and cast to float32 to avoid AMP half-precision issues.
+    """
+    dev = _lpips_device()
+    a = (a * 2 - 1).to(dev, dtype=torch.float32, non_blocking=True)
+    b = (b * 2 - 1).to(dev, dtype=torch.float32, non_blocking=True)
+    return _lpips(a, b).mean()

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 from dataset import build_coco_dataloaders
 from modules import build_mambairv2_colorizer
-from utils.metrics import set_seed, lpips_loss
+from utils.metrics import set_seed, lpips_loss, _lpips
 from utils.train_tracker import StatTracker
 from utils.checkpoint_io import save_ckpt, load_ckpt
 
@@ -88,6 +88,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
     set_seed(int(cfg.get("seed", 1337)))
+
+    _lpips.to(device)
 
     exp_base = Path(cfg.get("out_dir", "outputs"))
     exp_name = args.exp_name or cfg.get("exp_defaults", "exp")
