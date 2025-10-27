@@ -17,7 +17,7 @@ import torch
 import torch.distributed as dist
 from torch.nn import Module
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from torch.optim import AdamW
 import torch.nn.functional as F
 
@@ -232,7 +232,7 @@ def main():
         return torch.mean(torch.sqrt((x - y)**2 + eps**2))
 
     opt = AdamW(net.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.0)))
-    scaler = GradScaler(device, enabled=bool(cfg.get("amp", True)))
+    scaler = GradScaler(enabled=bool(cfg.get("amp", True)))
 
     total_steps = None
     if cfg.get("epochs") and len(train_loader) > 0:
@@ -285,7 +285,7 @@ def main():
             x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
             y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
 
-            with autocast(device, enabled=bool(cfg.get("amp", True))):
+            with autocast(enabled=bool(cfg.get("amp", True))):
                 pred_rgb = net(x_in)
                 loss_l1  = charbonnier(pred_rgb, y_tgt)
                 pr_s = F.interpolate(pred_rgb,  size=lpips_side, mode="bilinear", align_corners=False)
