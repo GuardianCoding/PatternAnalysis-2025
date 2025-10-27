@@ -2,7 +2,7 @@
 import os, random, zipfile
 from typing import Tuple, Optional, Dict
 import torch
-from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.utils.data import Dataset, DataLoader, DistributedSampler, Subset
 from torchvision.datasets import CocoDetection
 import torchvision.transforms.functional as F
 from torchvision import transforms
@@ -288,12 +288,23 @@ def build_coco_dataloaders(
         crop_size=crop_size,
     )
 
+    # ---- optional: cap validation set size with a deterministic subset ----
+    val_max_items = int(cfg.get("val_max_items", 0))
+    if val_max_items > 0 and val_max_items < len(eval_ds):
+        seed = int(cfg.get("val_subset_seed", 1337))
+        rng = random.Random(seed)
+        idxs = list(range(len(eval_ds)))
+        rng.shuffle(idxs)
+        idxs = sorted(idxs[:val_max_items])  # keep stable, increasing order for nice logs
+        eval_ds = Subset(eval_ds, idxs)
+
     train_sampler: Optional[DistributedSampler] = None
     eval_sampler: Optional[DistributedSampler]  = None
     if use_ddp:
         train_sampler = DistributedSampler(train_ds, shuffle=True, drop_last=False)
         eval_sampler  = DistributedSampler(eval_ds,  shuffle=False, drop_last=False)
 
+    nworkers_train = max(1, int(cfg.get("num_workers", 4)))
     train_loader = DataLoader(
         train_ds,
         batch_size=int(cfg.get("batch_size", 10)),
@@ -301,11 +312,12 @@ def build_coco_dataloaders(
         sampler=train_sampler,
         num_workers=int(cfg.get("num_workers", 6)),
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=(nworkers_train > 0),
         prefetch_factor=int(cfg.get("prefetch_factor", 4)),
         worker_init_fn=_worker_init_fn,
     )
 
+    nworkers_val = max(1, int(cfg.get("num_workers_val", 4)))
     eval_loader = DataLoader(
         eval_ds,
         batch_size=int(cfg.get("val_batch_size", 8)),
@@ -313,7 +325,7 @@ def build_coco_dataloaders(
         sampler=eval_sampler,
         num_workers=max(1, int(cfg.get("num_workers_val", 4))),
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=(nworkers_val > 0),
         worker_init_fn=_worker_init_fn,
     )
 
