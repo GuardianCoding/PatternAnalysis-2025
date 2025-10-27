@@ -32,6 +32,7 @@ from torchvision.transforms import functional as F
 from torchvision.utils import save_image, make_grid
 from skimage.metrics import structural_similarity as ssim_metric
 import pandas as pd
+from torch.amp import autocast
 
 from modules import build_mambairv2_colorizer
 from utils.metrics import lpips_loss, psnr as psnr_fn
@@ -157,7 +158,7 @@ def main():
     have_gt = gt_root is not None and os.path.isdir(gt_root)
     lpips_list, psnr_list, ssim_list, names = [], [], [], []
 
-    autocast_ctx = torch.cuda.amp.autocast if (cfg.get("amp", False) and device.type == "cuda") else torch.cpu.amp.autocast
+    autocast_ctx = autocast(device) if (cfg.get("amp", False) and device.type == "cuda") else autocast("cpu")
     with torch.inference_mode(), autocast_ctx():
         for i, p in enumerate(files, 1):
             name = os.path.basename(p)
