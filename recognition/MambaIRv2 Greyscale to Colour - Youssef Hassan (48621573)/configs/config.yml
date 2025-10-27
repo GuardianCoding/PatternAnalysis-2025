@@ -9,11 +9,11 @@ exp_defaults: mamba_results
 # ann_root:   /dataset/coco/annotations
 
 # training
-epochs: 30
+epochs: 10
 batch_size: 1            # per-GPU
 val_batch_size: 1
-val_max_items: 2000       # cap number of validation images (0 = no cap)
-val_subset_seed: 1337     # seed for deterministic val subset sampling
+val_max_items: 200       # cap number of validation images (0 = no cap)
+val_subset_seed: 1337    # seed for deterministic val subset sampling
 grad_accum: 6            # effective 16
 
 # Hyperparameters
@@ -28,8 +28,8 @@ save_every: 2000
 val_every: 1000
 
 # dataloader
-num_workers: 2
-num_workers_val: 1
+num_workers: 16
+num_workers_val: 16
 prefetch_factor: 2
 
 # loss weights
@@ -37,7 +37,7 @@ lambda_l1: 1.0
 lambda_lpips: 0.2
 
 # aug
-crop_size: 160
+crop_size: 256
 hflip: true
 rgb_jitter_prob: 0.2
 rgb_jitter_strength: 0.1
@@ -47,11 +47,11 @@ model:
   variant: MambaIRv2    # for logging only
   upscale: 1
   in_chans: 3
-  img_size: 128
+  img_size: 256
   img_range: 1.
   embed_dim: 174
   d_state: 16
-  depths: [6, 6, 6,6,6,6]
+  depths: [6,6,6,6,6,6]
   num_heads: [6,6,6,6,6,6]
   window_size: 16
   inner_rank: 64
@@ -64,4 +64,4 @@ pretrained: checkpoints/mambairv2_ColorDN_15.pth
 resume: null
 
 # LPIPS downsample
-lpips_side: 128
+lpips_side: 256
