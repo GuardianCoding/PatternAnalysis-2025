@@ -219,7 +219,7 @@ def main():
 
             with autocast(enabled=bool(cfg.get("amp", True))):
                 pred_rgb = net(x_in)
-                loss_l1  = charbonnier(pred_rgb - y_tgt)
+                loss_l1  = charbonnier(pred_rgb, y_tgt)
                 pr_s = F.interpolate(pred_rgb,  size=lpips_side, mode="bilinear", align_corners=False)
                 gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
                 loss_lp = lpips_loss(pr_s, gt_s)
@@ -254,7 +254,7 @@ def main():
                         x_in  = x_in.to(device)
                         y_tgt = y_tgt.to(device)
                         pred_rgb = net(x_in)
-                        val_l1  += charbonnier(pred_rgb - y_tgt).item()
+                        val_l1  += charbonnier(pred_rgb, y_tgt).item()
                         val_lp  += lpips_loss(pred_rgb, y_tgt).item()
                         n_count += 1
 
