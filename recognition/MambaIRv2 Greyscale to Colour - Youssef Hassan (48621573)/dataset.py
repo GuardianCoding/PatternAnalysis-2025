@@ -282,6 +282,17 @@ def build_coco_dataloaders(
         rgb_jitter_strength=float(cfg.get("rgb_jitter_strength", 0.1)),
         longside_scale_range=tuple(cfg.get("longside_scale_range", (1.00, 1.15))),
     )
+
+    # ---- optional: cap training set size with a deterministic subset ----
+    train_max_items = int(cfg.get("train_max_items", 0))
+    if train_max_items > 0 and train_max_items < len(train_ds):
+        seed = int(cfg.get("train_subset_seed", 1337))
+        rng = random.Random(seed)
+        idxs = list(range(len(train_ds)))
+        rng.shuffle(idxs)
+        idxs = sorted(idxs[:train_max_items])  # stable order for nicer logs
+        train_ds = Subset(train_ds, idxs)
+
     eval_ds = CocoColorisationEval(
         img_root=val_root,
         ann_file=os.path.join(ann_root, "instances_val2017.json"),
