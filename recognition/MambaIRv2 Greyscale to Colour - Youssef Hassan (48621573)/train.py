@@ -36,12 +36,12 @@ torch.backends.cudnn.benchmark = True
 class EMA:
     def __init__(self, model, decay: float):
         self.decay = float(decay)
-        self.shadow = {}
-        # Track only floating-point tensors (params + buffers like running_mean/var)
+        self.shadow: dict[str, torch.Tensor] = {}
+        self._backup: dict[str, torch.Tensor] | None = None  # for swap-in/out
         for k, v in model.state_dict().items():
             if torch.is_tensor(v) and v.dtype.is_floating_point:
                 t = v.detach().clone()
-                t.requires_grad = False
+                t.requires_grad_(False)
                 self.shadow[k] = t
 
     @torch.no_grad()
@@ -51,13 +51,60 @@ class EMA:
         msd = model.state_dict()
         for k, s in self.shadow.items():
             v = msd[k]
-            # guard against dtype/device mismatches
             if v.dtype != s.dtype:
                 v = v.to(dtype=s.dtype)
             if v.device != s.device:
                 v = v.to(device=s.device, non_blocking=True)
             s.mul_(self.decay).add_(v, alpha=1.0 - self.decay)
 
+    # ---- Apply EMA weights permanently (matches your call site) ----
+    @torch.no_grad()
+    def apply_to(self, model):
+        msd = model.state_dict()
+        for k, s in self.shadow.items():
+            tgt = msd[k]
+            if tgt.device != s.device:
+                s = s.to(device=tgt.device, non_blocking=True)
+            if tgt.dtype != s.dtype:
+                s = s.to(dtype=tgt.dtype)
+            tgt.copy_(s)
+
+    # ---- Optional: non-destructive swap for eval ----
+    @torch.no_grad()
+    def store(self, model):
+        """Save current (non-EMA) float weights to restore later."""
+        self._backup = {}
+        for k, s in self.shadow.items():
+            self._backup[k] = model.state_dict()[k].detach().clone()
+
+    @torch.no_grad()
+    def copy_to(self, model):
+        """Copy EMA -> model (like apply_to but intended for swap)."""
+        self.apply_to(model)
+
+    @torch.no_grad()
+    def restore(self, model):
+        """Restore the weights saved by store()."""
+        if self._backup is None:
+            return
+        msd = model.state_dict()
+        for k, v in self._backup.items():
+            if msd[k].device != v.device:
+                v = v.to(device=msd[k].device, non_blocking=True)
+            if msd[k].dtype != v.dtype:
+                v = v.to(dtype=msd[k].dtype)
+            msd[k].copy_(v)
+        self._backup = None
+
+    # ---- (Nice-to-have) checkpointing support for EMA shadow ----
+    def state_dict(self):
+        return {"decay": self.decay, "shadow": {k: v.cpu() for k, v in self.shadow.items()}}
+
+    def load_state_dict(self, state):
+        self.decay = float(state["decay"])
+        self.shadow = {k: v.clone().detach() for k, v in state["shadow"].items()}
+        for t in self.shadow.values():
+            t.requires_grad_(False)
 
 class WarmupCosine:
     def __init__(self, optimizer, base_lr, warmup_steps, max_steps):
