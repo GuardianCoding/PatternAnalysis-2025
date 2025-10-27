@@ -1,6 +1,14 @@
 import warnings # Ignore warnings from lpip module
 warnings.filterwarnings("ignore", message=".*pretrained.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*Arguments other than a weight enum.*deprecated.*")
+warnings.filterwarnings(
+    "ignore",
+    message="torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument."
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Applied workaround for CuDNN issue, install nvrtc.so"
+)
 
 import os, argparse, time
 from pathlib import Path
@@ -26,19 +34,30 @@ torch.backends.cudnn.benchmark = True
 
 # --------------------- utilities ---------------------
 class EMA:
-    def __init__(self, model: Module, decay):
-        self.decay = decay
-        self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
-        for p in self.shadow.values():
-            p.requires_grad = False
+    def __init__(self, model, decay: float):
+        self.decay = float(decay)
+        self.shadow = {}
+        # Track only floating-point tensors (params + buffers like running_mean/var)
+        for k, v in model.state_dict().items():
+            if torch.is_tensor(v) and v.dtype.is_floating_point:
+                t = v.detach().clone()
+                t.requires_grad = False
+                self.shadow[k] = t
+
     @torch.no_grad()
     def update(self, model):
-        if self.decay <= 0: return
-        for k, v in model.state_dict().items():
-            self.shadow[k].mul_(self.decay).add_(v, alpha=1.0 - self.decay)
-    @torch.no_grad()
-    def apply_to(self, model):
-        model.load_state_dict(self.shadow, strict=False)
+        if self.decay <= 0:
+            return
+        msd = model.state_dict()
+        for k, s in self.shadow.items():
+            v = msd[k]
+            # guard against dtype/device mismatches
+            if v.dtype != s.dtype:
+                v = v.to(dtype=s.dtype)
+            if v.device != s.device:
+                v = v.to(device=s.device, non_blocking=True)
+            s.mul_(self.decay).add_(v, alpha=1.0 - self.decay)
+
 
 class WarmupCosine:
     def __init__(self, optimizer, base_lr, warmup_steps, max_steps):
