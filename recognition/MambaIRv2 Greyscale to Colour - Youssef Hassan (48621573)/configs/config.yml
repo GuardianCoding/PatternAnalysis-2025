@@ -10,7 +10,7 @@ exp_defaults: mamba_results
 
 # training
 epochs: 4
-batch_size: 2            # per-GPU
+batch_size: 1            # per-GPU
 train_max_items: 2000
 train_subset_seed: 1337
 val_batch_size: 1
@@ -27,8 +27,8 @@ amp: true
 ema_decay: 0.999
 
 # Saving
-save_every: 3000
-val_every: 1500
+save_every: 2000
+val_every: 1000
 
 # dataloader
 num_workers: 16
