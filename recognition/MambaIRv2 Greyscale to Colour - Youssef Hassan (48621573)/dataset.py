@@ -112,17 +112,18 @@ def _random_longside_resize(img: Image.Image, target: int, scale_range: Tuple[fl
 # --- RGB→RGB colorization I/O helper -----------------------------------------
 @torch.no_grad()
 def _to_gray3_and_rgb(img_rgb: Image.Image):
-    """
-    PIL RGB -> (gray3, rgb) tensors
-        gray3: [3,H,W] in [0,1] (grayscale replicated to 3 channels)
-        rgb:   [3,H,W] in [0,1] (ground-truth color)
-    """
-    # target: ground-truth color
-    rgb = F.to_tensor(img_rgb).contiguous()          # [3,H,W], float32, [0,1]
-    # input: grayscale replicated to 3 channels (model expects 3-ch input)
-    gray3_pil = F.rgb_to_grayscale(img_rgb, num_output_channels=3)
-    gray3 = F.to_tensor(gray3_pil).contiguous()      # [3,H,W], float32, [0,1]
-    return gray3, rgb
+    # 1. Convert to grayscale
+    gray_pil = F.rgb_to_grayscale(img_rgb, num_output_channels=1)
+
+    # 2. Histogram-equalize to exaggerate luminance variation
+    gray_eq = gray_pil.point(lambda p: int((p / 255.0) ** 0.8 * 255))  # gamma<1 brightens midtones
+
+    # 3. Stack into 3 channels
+    gray3 = F.to_tensor(gray_eq).repeat(3, 1, 1)
+
+    # 4. Target: full color
+    rgb = F.to_tensor(img_rgb)
+    return gray3.contiguous(), rgb.contiguous()
 
 # ------------------------ datasets ------------------------
 

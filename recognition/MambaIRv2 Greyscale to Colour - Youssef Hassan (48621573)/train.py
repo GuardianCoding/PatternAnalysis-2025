@@ -298,7 +298,8 @@ def main():
                 pr_s = F.interpolate(pred_rgb,  size=lpips_side, mode="bilinear", align_corners=False)
                 gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
                 loss_lp = lpips_loss(pr_s, gt_s)
-                loss = (loss_l1 + loss_lp) / grad_accum
+                loss = cfg.get("lambda_l1", 1.0) * loss_l1 + cfg.get("lambda_lpips", 0.4) * loss_lp
+                loss = loss / grad_accum
 
             scaler.scale(loss).backward()
             step += 1

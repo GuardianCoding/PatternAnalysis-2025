@@ -22,9 +22,9 @@ grad_accum: 4            # effective 8
 lr: 1.0e-4
 min_lr: 1.0e-5
 weight_decay: 0.005
+ema_decay: 0.999
 warmup_steps: 500
 amp: true
-ema_decay: 0.999
 
 # Saving
 save_every: 2000
@@ -37,13 +37,13 @@ prefetch_factor: 2
 
 # loss weights
 lambda_l1: 1.0
-lambda_lpips: 0.2
+lambda_lpips: 0.4
 
 # aug
 crop_size: 256
 hflip: true
-rgb_jitter_prob: 0.2
-rgb_jitter_strength: 0.1
+rgb_jitter_prob: 0.3
+rgb_jitter_strength: 0.15
 
 # model
 model:

@@ -247,7 +247,8 @@ def main():
             else:
                 pred_rgb = net(x_in).clamp(0, 1)
             
-            pred_rgb = net(x_in).clamp(0, 1)                    # (1,3,H,W) in [0,1]
+            pred_rgb = net(x_in)                    # (1,3,H,W) in [0,1]
+            pred_rgb = torch.sigmoid(pred_rgb)      # ensures [0,1] smoothly
 
             # Save colorized image
             save_image(pred_rgb, color_dir / name)
