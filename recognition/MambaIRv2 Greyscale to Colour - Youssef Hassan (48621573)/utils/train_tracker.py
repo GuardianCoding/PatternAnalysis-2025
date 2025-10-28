@@ -34,7 +34,7 @@ class StatTracker:
         self.csv_path = self.out_dir / "logs" / "train_log.csv"
         self.epoch_csv_path = self.out_dir / "logs" / "epochs_log.csv"
         self.runtime_path = self.out_dir / "runtime.txt"
-        self.png_path = self.out_dir / "plots.png"
+        self.svg_path = self.out_dir / "plots.svg"
         self.redraw_every = max(1, int(redraw_every))
         self.is_main = bool(is_main)
         self.smoothing = float(smoothing)
@@ -143,7 +143,7 @@ class StatTracker:
             self.redraw(force=True)
 
     def redraw(self, force: bool = False):
-        """Update live plot using draw()/pause(). In headless, save a PNG instead."""
+        """Update live plot using draw()/pause(). In headless, save a SVG instead."""
         if not self.is_main or self.fig is None:
             return
         if not force and len(self.steps) > 0 and (self.steps[-1] - self._last_redraw_step) < self.redraw_every:
@@ -154,7 +154,7 @@ class StatTracker:
 
         self.fig.tight_layout()
         if self._headless:
-            self.fig.savefig(self.png_path, dpi=150)
+            self.fig.savefig(self.svg_path, dpi=150)
         else:
             plt.draw()
             plt.pause(0.001)
@@ -164,7 +164,7 @@ class StatTracker:
     def save_fig(self, path: Optional[Path] = None):
         if not self.is_main or self.fig is None:
             return
-        p = Path(path) if path is not None else self.png_path
+        p = Path(path) if path is not None else self.svg_path
         self.fig.savefig(p, dpi=150)
 
     def close(self):
