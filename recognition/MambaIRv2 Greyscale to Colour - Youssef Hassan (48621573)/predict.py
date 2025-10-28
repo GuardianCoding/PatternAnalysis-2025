@@ -99,6 +99,58 @@ def ssim_on_tensors(a01: torch.Tensor, b01: torch.Tensor) -> float:
     b = tensor01_to_uint8_img(b01)
     return float(ssim_metric(a, b, channel_axis=2, data_range=255))
 
+def maybe_downscale_pil(img: Image.Image, max_side=0, max_pixels=0) -> Image.Image:
+    W, H = img.size
+    if max_pixels and H*W > max_pixels:
+        s = (max_pixels / (H*W))**0.5
+        W, H = max(1, int(W*s)), max(1, int(H*s))
+        img = img.resize((W, H), Image.BICUBIC)
+    if max_side and max(H, W) > max_side:
+        s = max_side / max(H, W)
+        W, H = max(1, int(W*s)), max(1, int(H*s))
+        img = img.resize((W, H), Image.BICUBIC)
+    return img
+
+import math
+
+def pad_to_multiple(x: torch.Tensor, multiple: int) -> tuple[torch.Tensor, tuple[int,int]]:
+    _,_,H,W = x.shape
+    Hn = math.ceil(H / multiple) * multiple
+    Wn = math.ceil(W / multiple) * multiple
+    if (Hn, Wn) == (H, W): 
+        return x, (0,0)
+    xpad = torch.nn.functional.pad(x, (0, Wn-W, 0, Hn-H), mode="reflect")
+    return xpad, (Hn-H, Wn-W)
+
+@torch.no_grad()
+def forward_tiled(net, x01, tile=512, overlap=32, pad_mult=8):
+    # Optionally pad to model/window multiple to avoid boundary artifacts
+    x_pad, (ph, pw) = pad_to_multiple(x01, pad_mult)
+    _, C, H, W = x_pad.shape
+    out = torch.zeros_like(x_pad)
+    norm = torch.zeros((1,1,H,W), device=x_pad.device, dtype=x_pad.dtype)
+
+    step = tile - overlap
+    for y in range(0, H, step):
+        for x in range(0, W, step):
+            y0 = y
+            x0 = x
+            y1 = min(y0 + tile, H)
+            x1 = min(x0 + tile, W)
+            # grow box to include overlap but clip to image
+            y0i = max(0, y1 - tile)
+            x0i = max(0, x1 - tile)
+            patch = x_pad[:, :, y0i:y1, x0i:x1]
+            pred  = net(patch).clamp(0,1)
+            out[:, :, y0i:y1, x0i:x1] += pred
+            norm[:, :, y0i:y1, x0i:x1] += 1.0
+
+    out = out / norm.clamp_min(1.0)
+    # unpad back to original size
+    if ph or pw:
+        out = out[:, :, :H - ph, :W - pw]
+    return out
+
 # ------------------ main ------------------
 
 def main():
@@ -110,6 +162,11 @@ def main():
     ap.add_argument("--embed_dim", type=int, default=None, help="Override model.embed_dim if needed")
     ap.add_argument("--depths",    type=int, nargs="+", default=None, help="Override model.depths if needed")
     ap.add_argument("--amp", action="store_true", help="Enable mixed-precision inference")
+    ap.add_argument("--tile", type=int, default=0, help="Enable tiled inference with this tile size (e.g., 512)")
+    ap.add_argument("--overlap", type=int, default=32, help="Tile overlap (pixels)")
+    ap.add_argument("--no-panels", action="store_true", help="Do not save comparison panels")
+    ap.add_argument("--max-side", type=int, default=0, help="If >0, downscale so max(H,W)<=max-side")
+    ap.add_argument("--max-pixels", type=int, default=0, help="If >0, downscale so H*W<=max-pixels")
     args = ap.parse_args()
 
     # Load + merge config
@@ -148,6 +205,7 @@ def main():
         raise RuntimeError(f"No images found under: {test_root}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Device: {device}")
 
     # Build model shell and load trained ckpt
     net = build_mambairv2_colorizer(
@@ -171,14 +229,24 @@ def main():
     have_gt = gt_root is not None and os.path.isdir(gt_root)
     lpips_list, psnr_list, ssim_list, names = [], [], [], []
 
-    amp_enabled = bool(cfg.get("amp", False)) and device.type == "cuda"
+    amp_enabled = bool(cfg.get("amp", True)) and device.type == "cuda"
     autocast_ctx = autocast if amp_enabled else nullcontext
     with torch.inference_mode(), autocast_ctx():
         for i, p in enumerate(files, 1):
             name = os.path.basename(p)
             # Load input image (RGB), then convert to 3-ch grayscale for the model
             rgb_pil = Image.open(p).convert("RGB")
+            rgb_pil = maybe_downscale_pil(rgb_pil, max_side=args.max_side, max_pixels=args.max_pixels)
+
             x_in = rgb_pil_to_gray3_tensor(rgb_pil).to(device)  # (1,3,H,W)
+            
+            # Inference (tiled if requested)
+            if args.tile and args.tile > 0:
+                # choose pad multiple to match model's window
+                pred_rgb = forward_tiled(net, x_in, tile=args.tile, overlap=args.overlap, pad_mult=int(cfg["model"].get("window_size", 8))).clamp(0,1)
+            else:
+                pred_rgb = net(x_in).clamp(0, 1)
+            
             pred_rgb = net(x_in).clamp(0, 1)                    # (1,3,H,W) in [0,1]
 
             # Save colorized image
@@ -215,8 +283,12 @@ def main():
             else:
                 print(f"[{i:04d}/{len(files)}] {name}  saved")
 
-            panel = make_grid(torch.cat(imgs, dim=0), nrow=len(imgs))
-            save_image(panel, panel_dir / name)
+            
+            if not args.no_panels:
+                imgs_cpu = [t.cpu() for t in imgs]  # ensure CPU
+                panel = make_grid(torch.cat(imgs_cpu, dim=0), nrow=len(imgs_cpu))
+                save_image(panel, panel_dir / name)
+
             torch.cuda.empty_cache()
 
     # Write metrics summary if any
