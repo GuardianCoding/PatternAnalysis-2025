@@ -9,25 +9,26 @@ exp_defaults: mamba_results
 # ann_root:   /dataset/coco/annotations
 
 # training
-epochs: 10
-batch_size: 1            # per-GPU
+epochs: 4
+batch_size: 2            # per-GPU
 max_items: 2000
 train_subset_seed: 1337
 val_batch_size: 1
-val_max_items: 200       # cap number of validation images (0 = no cap)
+val_max_items: 64        # cap number of validation images (0 = no cap)
 val_subset_seed: 1337    # seed for deterministic val subset sampling
-grad_accum: 6            # effective 16
+grad_accum: 4            # effective 8
 
 # Hyperparameters
-lr: 2.0e-4
-weight_decay: 0.05
-warmup_steps: 1000
+lr: 1.0e-4
+min_lr: 1.0e-5
+weight_decay: 0.005
+warmup_steps: 500
 amp: true
 ema_decay: 0.999
 
 # Saving
-save_every: 2000
-val_every: 1000
+save_every: 3000
+val_every: 1500
 
 # dataloader
 num_workers: 16

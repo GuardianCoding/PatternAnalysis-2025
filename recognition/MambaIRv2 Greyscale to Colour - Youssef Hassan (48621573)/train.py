@@ -10,7 +10,7 @@ warnings.filterwarnings(
     message="Applied workaround for CuDNN issue, install nvrtc.so"
 )
 
-import os, argparse, time
+import os, argparse, time, math
 from pathlib import Path
 import yaml
 import torch
@@ -106,24 +106,24 @@ class EMA:
         for t in self.shadow.values():
             t.requires_grad_(False)
 
-class WarmupCosine:
-    def __init__(self, optimizer, base_lr, warmup_steps, max_steps):
-        self.opt = optimizer
-        self.base = float(base_lr)
-        self.warm = max(1, int(warmup_steps))
+class WarmupCosine(torch.optim.lr_scheduler._LRScheduler):
+    def __init__(self, optimizer, base_lr, warmup_steps, max_steps, min_lr=1e-5, last_epoch=-1):
+        self.base_lr   = float(base_lr)
+        self.warmup    = max(1, int(warmup_steps))
         self.max_steps = max_steps
-        self.t = 0
-    def step(self):
-        self.t += 1
-        if not self.max_steps or self.max_steps <= self.warm:
-            lr = self.base
-        elif self.t <= self.warm:
-            lr = self.base * self.t / self.warm
-        else:
-            progress = (self.t - self.warm) / (self.max_steps - self.warm)
-            lr = 0.5 * self.base * (1 + torch.cos(torch.tensor(progress * 3.1415926535)).item())
-        for g in self.opt.param_groups:
-            g["lr"] = lr
+        self.min_lr    = float(min_lr)
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        step = self.last_epoch + 1
+        # linear warm-up to base_lr
+        if self.max_steps is None or step <= self.warmup:
+            scale = min(1.0, step / self.warmup)
+            return [self.base_lr * scale for _ in self.optimizer.param_groups]
+        # cosine decay to min_lr
+        t = (step - self.warmup) / (self.max_steps - self.warmup)
+        cos = 0.5 * (1 + math.cos(math.pi * min(1.0, max(0.0, t))))
+        return [self.min_lr + (self.base_lr - self.min_lr) * cos for _ in self.optimizer.param_groups]
 
 # --------------------- main ---------------------
 
@@ -237,7 +237,14 @@ def main():
     total_steps = None
     if cfg.get("epochs") and len(train_loader) > 0:
         total_steps = int(cfg["epochs"]) * len(train_loader) // max(1, int(cfg.get("grad_accum", 1)))
-    sched = WarmupCosine(opt, base_lr=float(cfg["lr"]), warmup_steps=int(cfg.get("warmup_steps", 1000)), max_steps=total_steps)
+
+    sched = WarmupCosine(
+    opt,
+    base_lr=float(cfg["lr"]),
+    warmup_steps=int(cfg.get("warmup_steps", 500)),
+    max_steps=total_steps,
+    min_lr=float(cfg.get("min_lr", 1e-5)),
+    )
 
     # --------------------- EMA ---------------------
     ema = None
