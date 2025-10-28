@@ -17,6 +17,18 @@ Examples:
     --amp
 """
 
+import warnings # Ignore warnings from lpip module
+warnings.filterwarnings("ignore", message=".*pretrained.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*Arguments other than a weight enum.*deprecated.*")
+warnings.filterwarnings(
+    "ignore",
+    message="torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument."
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Applied workaround for CuDNN issue, install nvrtc.so"
+)
+
 import os
 import argparse
 from glob import glob
@@ -205,6 +217,7 @@ def main():
 
             panel = make_grid(torch.cat(imgs, dim=0), nrow=len(imgs))
             save_image(panel, panel_dir / name)
+            torch.cuda.empty_cache()
 
     # Write metrics summary if any
     if len(lpips_list) > 0:
