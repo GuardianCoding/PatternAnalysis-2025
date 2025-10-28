@@ -11,7 +11,7 @@ exp_defaults: mamba_results
 # training
 epochs: 4
 batch_size: 2            # per-GPU
-max_items: 2000
+train_max_items: 2000
 train_subset_seed: 1337
 val_batch_size: 1
 val_max_items: 64        # cap number of validation images (0 = no cap)
