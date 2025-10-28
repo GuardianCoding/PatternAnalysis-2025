@@ -205,7 +205,7 @@ def main():
         raise RuntimeError(f"No images found under: {test_root}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Device: {device}")
+    print(f"Device: {device}")
 
     # Build model shell and load trained ckpt
     net = build_mambairv2_colorizer(
