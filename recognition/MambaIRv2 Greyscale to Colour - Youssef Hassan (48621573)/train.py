@@ -252,16 +252,16 @@ def main():
         ema = EMA(net.module if use_ddp else net, decay=float(cfg["ema_decay"]))
 
     # --------------------- resume ---------------------
-    step, best_lp, ema_sd = 0, 1e9, None
+    step, best_total, ema_sd = 0, 1e9, None
     if cfg.get("resume"):
         if is_main:
             print(f"[resume] loading {cfg['resume']}")
         _model = net.module if use_ddp else net
-        step, best_lp, ema_sd = load_ckpt(cfg["resume"], _model, opt, scaler)
+        step, best_total, ema_sd = load_ckpt(cfg["resume"], _model, opt, scaler)
         if ema_sd is not None and ema is not None:
             ema.shadow = ema_sd
         if is_main:
-            print(f"[resume] step={step} best_lpips={best_lp:.4f}")
+            print(f"[resume] step={step} best_total_loss={best_total:.4f}")
 
     # --------------------- train ---------------------
     grad_accum = max(1, int(cfg.get("grad_accum", 1)))
@@ -389,15 +389,15 @@ def main():
                 net.train()
 
                 # select best by LPIPS
-                if avg_lp < best_lp:
-                    best_lp = avg_lp
-                    save_ckpt(out_root/"best_lpips.ckpt", net.module if use_ddp else net,
-                            opt, scaler, step, best_lp, ema)
+                if avg_total < best_total:
+                    best_total = avg_total
+                    save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
+                            opt, scaler, step, best_total, ema)
 
 
             # periodic checkpoint (rank 0 only)
             if is_main and step % save_every == 0:
-                save_ckpt(out_root/f"step_{step}.ckpt", net.module if use_ddp else net, opt, scaler, step, best_lp, ema)
+                save_ckpt(out_root/f"step_{step}.ckpt", net.module if use_ddp else net, opt, scaler, step, best_total, ema)
 
             if step % 25 == 0:
                 torch.cuda.empty_cache()

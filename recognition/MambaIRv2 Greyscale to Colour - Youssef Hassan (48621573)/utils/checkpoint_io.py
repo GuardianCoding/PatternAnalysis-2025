@@ -2,7 +2,7 @@ import torch
 from torch.nn import Module
 from pathlib import Path
 
-def save_ckpt(path: Path, model: Module, opt, scaler, step, best_lpips, ema=None):
+def save_ckpt(path: Path, model: Module, opt, scaler, step, best_total, ema=None):
     """Save model, optimizer, scaler, and EMA state to a checkpoint."""
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -10,7 +10,7 @@ def save_ckpt(path: Path, model: Module, opt, scaler, step, best_lpips, ema=None
         "optimizer": opt.state_dict(),
         "scaler": scaler.state_dict() if scaler is not None else None,
         "step": step,
-        "best_lpips": best_lpips,
+        "best_total": best_total,
         "ema": (ema.shadow if ema is not None else None),
     }, path)
 
@@ -23,6 +23,6 @@ def load_ckpt(path, model: Module, opt=None, scaler=None):
     if scaler is not None and ck.get("scaler") is not None:
         scaler.load_state_dict(ck["scaler"])
     step = ck.get("step", 0)
-    best_lp = ck.get("best_lpips", 1e9)
+    best_total = ck.get("best_total", 1e9)
     ema_sd = ck.get("ema", None)
-    return step, best_lp, ema_sd
+    return step, best_total, ema_sd
