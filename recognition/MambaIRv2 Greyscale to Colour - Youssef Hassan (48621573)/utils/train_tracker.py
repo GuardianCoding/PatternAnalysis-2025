@@ -49,6 +49,9 @@ class StatTracker:
 
         self.val_steps = []
         self.val_lp = []
+        self.val_l1 = []
+        self.val_uv = []
+        self.val_tot = []
 
         # Smoothed
         self._ema_l1 = None
@@ -66,7 +69,7 @@ class StatTracker:
             if not self.csv_path.exists():
                 with open(self.csv_path, "w", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["step", "loss_l1", "loss_lpips", "loss_uv", "loss_total", "lr", "val_lpips"])
+                    w.writerow(["step", "loss_l1", "loss_lpips", "loss_uv", "loss_total", "lr", "val_l1", "val_lpips", "val_uv", "val_total"])
 
         # Plot init (only on main)
         self._headless = matplotlib.get_backend().lower() == "agg"
@@ -132,19 +135,28 @@ class StatTracker:
 
         # Append row to CSV
         if self.is_main:
-            self._append_csv(step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_lp=None)
+            self._append_csv(step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_l1=None, val_lp=None, val_uv=None, val_total=None)
 
         # Redraw if needed
         if self.is_main and (step - self._last_redraw_step) >= self.redraw_every:
             self.redraw()
 
-    def log_val(self, step: int, avg_lpips: float):
-        """Record a validation measurement."""
-        self.val_steps.append(int(step))
-        self.val_lp.append(float(avg_lpips))
+    def log_val(self, step: int, loss_l1: float, loss_lp: float, loss_uv: float, loss_total: float):
+        """Record validation metrics (L1, LPIPS, UV, Total) and update plot."""
+        step = int(step)
+        self.val_steps.append(step)
+        self.val_l1.append(float(loss_l1))
+        self.val_lp.append(float(loss_lp))
+        self.val_uv.append(float(loss_uv))
+        self.val_tot.append(float(loss_total))
+
         if self.is_main:
-            self._append_csv(step, "", "", "", "", val_lp=avg_lpips)
+            self._append_csv(step,
+                            loss_l1=None, loss_lp=None, loss_uv=None, total_loss=None, lr=None,
+                            val_l1=loss_l1, val_lp=loss_lp, val_uv=loss_uv, val_total=loss_total)
             self.redraw(force=True)
+
+        print(f"[val] step={step}  L1={loss_l1:.4f}  LPIPS={loss_lp:.4f}  UV={loss_uv:.4f}  TOTAL={loss_total:.4f}")
 
     def redraw(self, force: bool = False):
         """Update live plot using draw()/pause(). In headless, save a SVG instead."""
@@ -198,17 +210,19 @@ class StatTracker:
         self.lines["tot"] = tot_line
         self.lines["lr"] = lr_line
 
-        (v_line,) = self.ax_val.plot([], [], label="Val LPIPS")
-        self.lines["val"] = v_line
+        (vl1_line,)  = self.ax_val.plot([], [], label="Val L1")
+        (vlp_line,)  = self.ax_val.plot([], [], label="Val LPIPS")
+        (vuv_line,)  = self.ax_val.plot([], [], label="Val UV")
+        (vtot_line,) = self.ax_val.plot([], [], label="Val Total")
 
-        self.ax_train.set_title("Train losses / LR")
-        self.ax_train.set_xlabel("Step")
-        self.ax_train.set_ylabel("Loss")
-        self.ax_train.legend(loc="upper right")
+        self.lines["val_l1"]  = vl1_line
+        self.lines["val_lp"]  = vlp_line
+        self.lines["val_uv"]  = vuv_line
+        self.lines["val_tot"] = vtot_line
 
-        self.ax_val.set_title("Validation LPIPS")
+        self.ax_val.set_title("Validation losses")
         self.ax_val.set_xlabel("Step")
-        self.ax_val.set_ylabel("LPIPS")
+        self.ax_val.set_ylabel("Loss")
         self.ax_val.legend(loc="upper right")
 
         if not self._headless:
@@ -258,26 +272,54 @@ class StatTracker:
 
     def _update_val_axes(self):
         xv = self.val_steps
-        yv = self.val_lp
         if not xv:
             return
 
-        self.lines["val"].set_data(xv, yv)
+        y_l1  = self.val_l1
+        y_lp  = self.val_lp
+        y_uv  = self.val_uv
+        y_tot = self.val_tot
 
+        # Set data for each line
+        self.lines["val_l1"].set_data(xv, y_l1)
+        self.lines["val_lp"].set_data(xv, y_lp)
+        self.lines["val_uv"].set_data(xv, y_uv)
+        self.lines["val_tot"].set_data(xv, y_tot)
+
+        # X limits
         xmin, xmax = min(xv), max(xv)
         self.ax_val.set_xlim(xmin, xmax if xmax > xmin else xmin + 1)
 
-        ymin, ymax = min(yv), max(yv)
-        pad = 0.05 * (ymax - ymin + 1e-12)
-        self.ax_val.set_ylim(ymin - pad, ymax + pad)
+        # Y limits from all series
+        y_all = []
+        if y_l1:  y_all += y_l1
+        if y_lp:  y_all += y_lp
+        if y_uv:  y_all += y_uv
+        if y_tot: y_all += y_tot
+        if y_all:
+            ymin, ymax = min(y_all), max(y_all)
+            pad = 0.05 * (ymax - ymin + 1e-12)
+            self.ax_val.set_ylim(ymin - pad, ymax + pad)
 
-        best = min(yv)
-        self.ax_val.set_title(f"Validation LPIPS  |  best={best:.4f}")
+        best_lp = min(y_lp) if y_lp else float("nan")
+        last_tot = y_tot[-1] if y_tot else float("nan")
+        self.ax_val.set_title(f"Validation losses  |  best LPIPS={best_lp:.4f}  |  last TOTAL={last_tot:.4f}")
 
-    def _append_csv(self, step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_lp):
+    def _append_csv(self, step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_l1, val_lp, val_uv, val_total):
         with open(self.csv_path, "a", newline="") as f:
             w = csv.writer(f)
-            w.writerow([step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_lp if val_lp is not None else ""])
+            w.writerow([
+                step,
+                loss_l1 if loss_l1 is not None else "",
+                loss_lp if loss_lp is not None else "",
+                loss_uv if loss_uv is not None else "",
+                total_loss if total_loss is not None else "",
+                lr if lr is not None else "",
+                val_l1 if val_l1 is not None else "",
+                val_lp if val_lp is not None else "",
+                val_uv if val_uv is not None else "",
+                val_total if val_total is not None else "",
+            ])
 
     @staticmethod
     def _ema(x, prev, alpha):

@@ -340,29 +340,60 @@ def main():
                     bak = (net.module if use_ddp else net).state_dict()
                     ema.apply_to(net.module if use_ddp else net)
 
-                val_l1, val_lp, n_count = 0.0, 0.0, 0
+                # accumulators
+                val_l1, val_lp, val_uv, val_total, n_count = 0.0, 0.0, 0.0, 0.0, 0
+
                 with torch.no_grad():
                     for x_in, y_tgt, _ in eval_loader:
                         x_in  = x_in.to(device)
                         y_tgt = y_tgt.to(device)
-                        pred_rgb = net(x_in)
-                        val_l1  += charbonnier(pred_rgb, y_tgt).item()
-                        val_lp  += lpips_loss(pred_rgb, y_tgt).item()
-                        n_count += 1
 
-                avg_l1 = val_l1 / max(n_count, 1)
-                avg_lp = val_lp / max(n_count, 1)
+                        pred_rgb = net(x_in)
+
+                        # L1/Charbonnier (same as train)
+                        l1 = charbonnier(pred_rgb, y_tgt).item()
+
+                        # LPIPS on resized tensors (same size used in train)
+                        pr_s = F.interpolate(pred_rgb, size=lpips_side, mode="bilinear", align_corners=False)
+                        gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
+                        lp = lpips_loss(pr_s, gt_s).item()
+
+                        # UV chroma-only term (same as train)
+                        _, u1, v1 = rgb_to_yuv(pred_rgb)
+                        _, u2, v2 = rgb_to_yuv(y_tgt)
+                        uv = (F.l1_loss(u1, u2) + F.l1_loss(v1, v2)).item()
+
+                        # per-epoch dynamic weight
+                        lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
+
+                        # accumulate raw components + weighted total
+                        val_l1   += l1
+                        val_lp   += lp
+                        val_uv   += uv
+                        val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff * uv)
+                        n_count  += 1
+
+                # means
+                avg_l1    = val_l1 / max(n_count, 1)
+                avg_lp    = val_lp / max(n_count, 1)
+                avg_uv    = val_uv / max(n_count, 1)
+                avg_total = val_total / max(n_count, 1)
+
                 if is_main:
-                    tracker.log_val(step, avg_lp)
-                print(f"[val] step={step} CHARBONNIER={avg_l1:.4f} LPIPS={avg_lp:.4f}")
+                    tracker.log_val(step, avg_l1, avg_lp, avg_uv, avg_total)
+
+                print(f"[val] step={step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} λ_uv={dynamic_chroma_weighting(epoch, epochs, lambda_uv):.3f} TOTAL={avg_total:.4f}")
 
                 if ema is not None:
                     (net.module if use_ddp else net).load_state_dict(bak, strict=False)
                 net.train()
 
+                # select best by LPIPS
                 if avg_lp < best_lp:
                     best_lp = avg_lp
-                    save_ckpt(out_root/"best_lpips.ckpt", net.module if use_ddp else net, opt, scaler, step, best_lp, ema)
+                    save_ckpt(out_root/"best_lpips.ckpt", net.module if use_ddp else net,
+                            opt, scaler, step, best_lp, ema)
+
 
             # periodic checkpoint (rank 0 only)
             if is_main and step % save_every == 0:
