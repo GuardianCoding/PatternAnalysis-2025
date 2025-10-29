@@ -36,7 +36,7 @@ from pathlib import Path
 from datetime import datetime
 import yaml
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import torch
 import torchvision.transforms as T
@@ -150,6 +150,45 @@ def forward_tiled(net, x01, tile=512, overlap=32, pad_mult=8):
     if ph or pw:
         out = out[:, :, :H - ph, :W - pw]
     return out
+
+def save_panel_with_titles(imgs_01, titles, out_path):
+    """
+    imgs_01: list of (1,3,H,W) tensors in [0,1]
+    titles : list[str] same length as imgs_01
+    """
+    assert len(imgs_01) == len(titles) and len(imgs_01) > 0
+    pil_imgs = []
+    for t in imgs_01:
+        t = t.squeeze(0).clamp(0,1).permute(1,2,0).cpu().numpy()
+        arr = (t * 255.0).round().astype(np.uint8)
+        pil_imgs.append(Image.fromarray(arr))
+
+    W, H = pil_imgs[0].size
+    N = len(pil_imgs)
+    title_h = max(32, int(0.08 * H))  # title bar height
+    canvas = Image.new("RGB", (W * N, H + title_h), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas, "RGBA")
+
+    # Try a nicer font if system has it; fall back to default
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", size=int(title_h * 0.55))
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Draw per-tile title bars + paste images
+    for i, (img, title) in enumerate(zip(pil_imgs, titles)):
+        x0 = i * W
+        # semi-transparent bar
+        draw.rectangle([(x0, 0), (x0 + W, title_h)], fill=(0, 0, 0, 160))
+        # centered title
+        tw, th = draw.textbbox((0, 0), title, font=font)[2:]
+        tx = x0 + (W - tw) // 2
+        ty = (title_h - th) // 2
+        draw.text((tx, ty), title, font=font, fill=(255, 255, 255))
+        # paste image under the bar
+        canvas.paste(img, (x0, title_h))
+
+    canvas.save(out_path)
 
 # ------------------ main ------------------
 
@@ -288,8 +327,7 @@ def main():
             
             if not args.no_panels:
                 imgs_cpu = [t.cpu() for t in imgs]  # ensure CPU
-                panel = make_grid(torch.cat(imgs_cpu, dim=0), nrow=len(imgs_cpu))
-                save_image(panel, panel_dir / name)
+                save_panel_with_titles(imgs_cpu, titles, panel_dir / name)
 
             torch.cuda.empty_cache()
 
