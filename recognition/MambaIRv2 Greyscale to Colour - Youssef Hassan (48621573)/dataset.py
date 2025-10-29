@@ -119,7 +119,17 @@ def _to_gray3_and_rgb(img_rgb: Image.Image):
     gray_eq = gray_pil.point(lambda p: int((p / 255.0) ** 0.8 * 255))  # gamma<1 brightens midtones
 
     # 3. Stack into 3 channels
-    gray3 = F.to_tensor(gray_eq).repeat(3, 1, 1)
+    # Add subtle RGB-channel noise to break channel identity (training only)
+    gray = F.to_tensor(gray_eq)
+    if torch.is_grad_enabled():  # only when training, not inference
+        noise = torch.randn_like(gray) * 0.02
+        gray3 = torch.cat([
+            (gray + 0.5*noise).clamp(0,1),
+            (gray + 1.0*noise).clamp(0,1),
+            (gray + 1.5*noise).clamp(0,1)
+        ], dim=0)
+    else:
+        gray3 = gray.repeat(3, 1, 1)
 
     # 4. Target: full color
     rgb = F.to_tensor(img_rgb)
