@@ -331,7 +331,7 @@ def main():
                 current_lr = opt.param_groups[0]["lr"]
                 total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv).item()
                 tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, current_lr)
-                print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} λ_uv={lambda_uv_eff:.3f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
+                print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
 
             # validate (rank 0 only)
             if is_main and step % val_every == 0:
@@ -382,7 +382,7 @@ def main():
                 if is_main:
                     tracker.log_val(step, avg_l1, avg_lp, avg_uv, avg_total)
 
-                print(f"[val] step={step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} λ_uv={dynamic_chroma_weighting(epoch, epochs, lambda_uv):.3f} TOTAL={avg_total:.4f}")
+                print(f"[val] step={step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} lambda_uv={dynamic_chroma_weighting(epoch, epochs, lambda_uv):.3f} TOTAL={avg_total:.4f}")
 
                 if ema is not None:
                     (net.module if use_ddp else net).load_state_dict(bak, strict=False)
