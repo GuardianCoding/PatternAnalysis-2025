@@ -30,3 +30,16 @@ def lpips_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     a = (a * 2 - 1).to(dev, dtype=torch.float32, non_blocking=True)
     b = (b * 2 - 1).to(dev, dtype=torch.float32, non_blocking=True)
     return _lpips(a, b).mean()
+
+# --- YUV chroma-aware loss ---
+def rgb_to_yuv(x):
+    r, g, b = x[:,0:1], x[:,1:2], x[:,2:3]
+    y = 0.299*r + 0.587*g + 0.114*b
+    u = 0.492*(b - y)
+    v = 0.877*(r - y)
+    return y, u, v
+
+# --- dynamic chroma weighting ---
+def dynamic_chroma_weighting(epoch, total_epochs, lambda_uv):
+    decay = max(0.4, 1.0 - 0.6 * (epoch / total_epochs))  # fades from 1.0→0.4
+    lambda_uv = lambda_uv * decay

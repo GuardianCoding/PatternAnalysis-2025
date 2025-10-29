@@ -43,6 +43,7 @@ class StatTracker:
         self.steps = []
         self.l1 = []
         self.lp = []
+        self.uv = []
         self.tot = []
         self.lr = []
 
@@ -65,7 +66,7 @@ class StatTracker:
             if not self.csv_path.exists():
                 with open(self.csv_path, "w", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["step", "loss_l1", "loss_lpips", "loss_total", "lr", "val_lpips"])
+                    w.writerow(["step", "loss_l1", "loss_lpips", "loss_uv", "loss_total", "lr", "val_lpips"])
 
         # Plot init (only on main)
         self._headless = matplotlib.get_backend().lower() == "agg"
@@ -109,16 +110,19 @@ class StatTracker:
             w = csv.writer(f)
             w.writerow([int(epoch), float(duration_sec), int(steps), float(steps_per_sec), float(elapsed)])
 
-    def log_train(self, step: int, loss_l1: float, loss_lp: float, total_loss: Optional[float], lr: float):
+    def log_train(self, step: int, loss_l1: float, loss_lp: float, loss_uv: Optional[float], total_loss: Optional[float], lr: float):
         """Record a training step. total_loss can be None; we’ll compute loss_l1+loss_lp if so."""
         if total_loss is None:
             total_loss = float(loss_l1) + float(loss_lp)
+        if loss_uv is None:
+            loss_uv = 0.0
 
         self.steps.append(int(step))
         self.l1.append(float(loss_l1))
         self.lp.append(float(loss_lp))
         self.tot.append(float(total_loss))
         self.lr.append(float(lr))
+        self.uv.append(float(loss_uv))
 
         # EMA smoothing (for display only)
         if self.smoothing > 0:
@@ -128,7 +132,7 @@ class StatTracker:
 
         # Append row to CSV
         if self.is_main:
-            self._append_csv(step, loss_l1, loss_lp, total_loss, lr, val_lp=None)
+            self._append_csv(step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_lp=None)
 
         # Redraw if needed
         if self.is_main and (step - self._last_redraw_step) >= self.redraw_every:
@@ -184,11 +188,13 @@ class StatTracker:
 
         (l1_line,) = self.ax_train.plot([], [], label="L1")
         (lp_line,) = self.ax_train.plot([], [], label="LPIPS")
+        (uv_line,) = self.ax_train.plot([], [], label="UV")
         (tot_line,) = self.ax_train.plot([], [], label="Total")
         (lr_line,) = self.ax_train.plot([], [], label="LR (scaled)")
 
         self.lines["l1"] = l1_line
         self.lines["lp"] = lp_line
+        self.lines["uv"] = uv_line
         self.lines["tot"] = tot_line
         self.lines["lr"] = lr_line
 
@@ -217,6 +223,7 @@ class StatTracker:
         l1 = self._series(self.l1, self._ema_l1)
         lp = self._series(self.lp, self._ema_lp)
         tot = self._series(self.tot, self._ema_tot)
+        uv = self.uv
 
         if self.lr:
             lrmax = max(self.lr)
@@ -230,6 +237,7 @@ class StatTracker:
         self.lines["lp"].set_data(x, lp)
         self.lines["tot"].set_data(x, tot)
         self.lines["lr"].set_data(x, lr_scaled)
+        self.lines["uv"].set_data(x, uv)
 
         xmin, xmax = min(x), max(x)
         self.ax_train.set_xlim(xmin, xmax if xmax > xmin else xmin + 1)
@@ -239,6 +247,7 @@ class StatTracker:
         y_vals += lp if lp else []
         y_vals += tot if tot else []
         y_vals += lr_scaled if lr_scaled else []
+        y_vals += uv if uv else []
         if y_vals:
             ymin, ymax = min(y_vals), max(y_vals)
             pad = 0.05 * (ymax - ymin + 1e-12)
@@ -265,10 +274,10 @@ class StatTracker:
         best = min(yv)
         self.ax_val.set_title(f"Validation LPIPS  |  best={best:.4f}")
 
-    def _append_csv(self, step, loss_l1, loss_lp, total_loss, lr, val_lp):
+    def _append_csv(self, step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_lp):
         with open(self.csv_path, "a", newline="") as f:
             w = csv.writer(f)
-            w.writerow([step, loss_l1, loss_lp, total_loss, lr, val_lp if val_lp is not None else ""])
+            w.writerow([step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_lp if val_lp is not None else ""])
 
     @staticmethod
     def _ema(x, prev, alpha):

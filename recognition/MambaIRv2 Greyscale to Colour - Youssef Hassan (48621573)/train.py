@@ -23,7 +23,7 @@ import torch.nn.functional as F
 
 from dataset import build_coco_dataloaders
 from modules import build_mambairv2_colorizer
-from utils.metrics import set_seed, lpips_loss, _lpips
+from utils.metrics import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting
 from utils.train_tracker import StatTracker
 from utils.checkpoint_io import save_ckpt, load_ckpt
 
@@ -269,6 +269,7 @@ def main():
     val_every  = int(cfg.get("val_every", 1000))
     epochs     = int(cfg.get("epochs", 10))
     lpips_side = int(cfg.get("lpips_side", min(int(cfg.get("crop_size", 128)), 192)))
+    lambda_uv = float(cfg.get("lambda_uv", 0.8))
 
     if use_ddp and train_samp is not None:
         train_samp.set_epoch(1)
@@ -295,11 +296,22 @@ def main():
             with autocast(enabled=bool(cfg.get("amp", True))):
                 pred_rgb = net(x_in)
                 loss_l1  = charbonnier(pred_rgb, y_tgt)
+
                 pr_s = F.interpolate(pred_rgb,  size=lpips_side, mode="bilinear", align_corners=False)
                 gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
                 loss_lp = lpips_loss(pr_s, gt_s)
-                loss = cfg.get("lambda_l1", 1.0) * loss_l1 + cfg.get("lambda_lpips", 0.4) * loss_lp
-                loss = loss / grad_accum
+                
+                _, u1, v1 = rgb_to_yuv(pred_rgb)
+                _, u2, v2 = rgb_to_yuv(y_tgt)
+                loss_uv = F.l1_loss(u1, u2) + F.l1_loss(v1, v2)
+
+                lambda_uv = dynamic_chroma_weighting(epochs, epoch, lambda_uv)
+
+                loss = (
+                    cfg.get("lambda_l1", 1.0) * loss_l1 +
+                    cfg.get("lambda_lpips", 0.4) * loss_lp +
+                    lambda_uv * loss_uv
+                ) / grad_accum
 
             scaler.scale(loss).backward()
             step += 1
@@ -314,8 +326,8 @@ def main():
             # lightweight log (rank 0 only)
             if is_main and step % int(cfg.get("log_every", 100)) == 0:
                 current_lr = opt.param_groups[0]["lr"]
-                tracker.log_train(step, loss_l1.item(), loss_lp.item(), (loss_l1 + loss_lp).item(), current_lr)
-                print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} lr={opt.param_groups[0]['lr']:.2e}")
+                tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), (loss_l1 + loss_lp + loss_uv).item(), current_lr)
+                print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lr={opt.param_groups[0]['lr']:.2e}")
 
             # validate (rank 0 only)
             if is_main and step % val_every == 0:

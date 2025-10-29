@@ -38,6 +38,7 @@ prefetch_factor: 2
 # loss weights
 lambda_l1: 1.0
 lambda_lpips: 0.4
+lambda_uv: 0.8        # starting weight for chroma loss
 
 # aug
 crop_size: 256
