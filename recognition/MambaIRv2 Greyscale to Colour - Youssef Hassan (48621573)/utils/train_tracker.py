@@ -156,8 +156,6 @@ class StatTracker:
                             val_l1=loss_l1, val_lp=loss_lp, val_uv=loss_uv, val_total=loss_total)
             self.redraw(force=True)
 
-        print(f"[val] step={step}  L1={loss_l1:.4f}  LPIPS={loss_lp:.4f}  UV={loss_uv:.4f}  TOTAL={loss_total:.4f}")
-
     def redraw(self, force: bool = False):
         """Update live plot using draw()/pause(). In headless, save a SVG instead."""
         if not self.is_main or self.fig is None:
