@@ -270,6 +270,8 @@ def main():
     epochs     = int(cfg.get("epochs", 10))
     lpips_side = int(cfg.get("lpips_side", min(int(cfg.get("crop_size", 128)), 192)))
     lambda_uv = float(cfg.get("lambda_uv", 0.8))
+    w_l1 = float(cfg.get("lambda_l1", 1.0))
+    w_lp = float(cfg.get("lambda_lpips", 0.4))
 
     if use_ddp and train_samp is not None:
         train_samp.set_epoch(1)
@@ -305,12 +307,13 @@ def main():
                 _, u2, v2 = rgb_to_yuv(y_tgt)
                 loss_uv = F.l1_loss(u1, u2) + F.l1_loss(v1, v2)
 
-                lambda_uv = dynamic_chroma_weighting(epochs, epoch, lambda_uv)
+                # dynamic UV weight (per-epoch)
+                lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
 
                 loss = (
-                    cfg.get("lambda_l1", 1.0) * loss_l1 +
-                    cfg.get("lambda_lpips", 0.4) * loss_lp +
-                    lambda_uv * loss_uv
+                    w_l1 * loss_l1 +
+                    w_lp * loss_lp +
+                    lambda_uv_eff * loss_uv
                 ) / grad_accum
 
             scaler.scale(loss).backward()
@@ -326,8 +329,9 @@ def main():
             # lightweight log (rank 0 only)
             if is_main and step % int(cfg.get("log_every", 100)) == 0:
                 current_lr = opt.param_groups[0]["lr"]
-                tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), (loss_l1 + loss_lp + loss_uv).item(), current_lr)
-                print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lr={opt.param_groups[0]['lr']:.2e}")
+                total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv).item()
+                tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, current_lr)
+                print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} λ_uv={lambda_uv_eff:.3f} lr={current_lr:.2e}")
 
             # validate (rank 0 only)
             if is_main and step % val_every == 0:

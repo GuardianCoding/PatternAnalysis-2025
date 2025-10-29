@@ -40,6 +40,16 @@ def rgb_to_yuv(x):
     return y, u, v
 
 # --- dynamic chroma weighting ---
-def dynamic_chroma_weighting(epoch, total_epochs, lambda_uv):
-    decay = max(0.4, 1.0 - 0.6 * (epoch / total_epochs))  # fades from 1.0→0.4
-    lambda_uv = lambda_uv * decay
+def dynamic_chroma_weighting(epoch: int, total_epochs: int, base_lambda_uv: float) -> float:
+    """
+    Returns a decayed lambda_uv in [0.4*base, 1.0*base] across training.
+    - epoch: 1-based current epoch
+    - total_epochs: total number of epochs
+    - base_lambda_uv: the lambda_uv from the config
+    """
+    if total_epochs <= 0:
+        return float(base_lambda_uv)
+    # fades from 1.0 → 0.4 as epoch goes 1 → total_epochs
+    progress = max(0.0, min(1.0, (epoch - 1) / max(1, total_epochs - 1)))
+    decay = max(0.4, 1.0 - 0.6 * progress)
+    return float(base_lambda_uv) * float(decay)
