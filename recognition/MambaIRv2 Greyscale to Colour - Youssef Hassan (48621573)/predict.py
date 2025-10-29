@@ -242,13 +242,14 @@ def main():
             
             # Inference (tiled if requested)
             if args.tile and args.tile > 0:
-                # choose pad multiple to match model's window
-                pred_rgb = forward_tiled(net, x_in, tile=args.tile, overlap=args.overlap, pad_mult=int(cfg["model"].get("window_size", 8))).clamp(0,1)
+                pred_rgb = forward_tiled(
+                    net, x_in, tile=args.tile, overlap=args.overlap,
+                    pad_mult=int(cfg["model"].get("window_size", 8))
+            )
             else:
-                pred_rgb = net(x_in).clamp(0, 1)
-            
-            pred_rgb = net(x_in)                    # (1,3,H,W) in [0,1]
-            pred_rgb = torch.sigmoid(pred_rgb)      # ensures [0,1] smoothly
+                pred_rgb = net(x_in)
+
+            pred_rgb = torch.sigmoid(pred_rgb)   # ensures [0,1] smoothly
 
             # Save colorized image
             save_image(pred_rgb, color_dir / name)
