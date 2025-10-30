@@ -322,9 +322,10 @@ def main():
             step += 1
 
             if step % grad_accum == 0:
-                scaler.step(opt); scaler.update()
-                opt.zero_grad(set_to_none=True)
+                scaler.step(opt)
+                scaler.update()
                 sched.step()
+                opt.zero_grad(set_to_none=True)
                 if ema is not None:
                     ema.update(net.module if use_ddp else net)
 
