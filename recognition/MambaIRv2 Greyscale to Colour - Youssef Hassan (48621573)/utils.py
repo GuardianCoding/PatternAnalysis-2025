@@ -81,6 +81,25 @@ def rgb_to_yuv(x):
     v = 0.877*(r - y)
     return y, u, v
 
+def yuv_to_rgb(y: torch.Tensor, u: torch.Tensor, v: torch.Tensor, clamp: bool = True) -> torch.Tensor:
+    """
+    Inverse of rgb_to_yuv used in this repo.
+    Inputs: y,u,v in [B,1,H,W]. Returns RGB in [B,3,H,W].
+    """
+    # Invert the linear mapping used in rgb_to_yuv
+    r = v * (1.0 / 0.877) + y
+    b = u * (1.0 / 0.492) + y
+    g = (y - 0.299 * r - 0.114 * b) / 0.587
+    x = torch.cat([r, g, b], dim=1)
+    return x.clamp(0, 1) if clamp else x
+
+def yuv3_to_rgb(x_yuv: torch.Tensor, clamp: bool = True) -> torch.Tensor:
+    """
+    Convenience: x_yuv is [B,3,H,W] with channels [Y,U,V].
+    """
+    y, u, v = x_yuv[:, 0:1], x_yuv[:, 1:2], x_yuv[:, 2:3]
+    return yuv_to_rgb(y, u, v, clamp=clamp)
+
 # --- dynamic chroma weighting ---
 def dynamic_chroma_weighting(epoch: int, total_epochs: int, base_lambda_uv: float) -> float:
     """

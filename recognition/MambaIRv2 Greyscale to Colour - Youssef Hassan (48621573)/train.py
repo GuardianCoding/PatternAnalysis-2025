@@ -23,7 +23,7 @@ import torch.nn.functional as F
 
 from dataset import build_coco_dataloaders
 from modules import build_mambairv2_colorizer
-from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting
+from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting, rgb_to_yuv, yuv_to_rgb
 from utils import StatTracker
 from utils import save_ckpt, load_ckpt
 from utils import save_panel_with_titles
@@ -296,6 +296,16 @@ def main():
 
             x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
             y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
+
+            # Chroma nudge to break grey copying
+            if cfg.get("uv_input_dither", True) and net.training:
+                with torch.no_grad():
+                    y, u, v = rgb_to_yuv(x_in)  # (B,1,H,W)
+                    std = float(cfg.get("uv_dither_std", 0.01))
+                    if std > 0:
+                        u = u + std * torch.randn_like(u)
+                        v = v + std * torch.randn_like(v)
+                        x_in = yuv_to_rgb(y, u, v, clamp=True).contiguous(memory_format=torch.channels_last)
 
             with autocast(enabled=bool(cfg.get("amp", True))):
                 pred_rgb = net(x_in)
