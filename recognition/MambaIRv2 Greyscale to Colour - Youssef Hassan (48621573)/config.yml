@@ -16,20 +16,21 @@ train_subset_seed: 1337
 val_batch_size: 1
 val_max_items: 64        # cap number of validation images (0 = no cap)
 val_subset_seed: 1337    # seed for deterministic val subset sampling
-grad_accum: 4            # effective 8
+grad_accum: 2            # effective 8
 
 # Hyperparameters
-lr: 1.0e-4
-min_lr: 1.0e-5
+lr: 2.0e-4
+min_lr: 5.0e-6
 weight_decay: 0.005
 ema_decay: 0.999
-warmup_steps: 500
+warmup_steps: 1500
 amp: true
 
 # Saving
 save_every: 2000
 val_every: 1000
-panel_every: 500
+panel_every: 200
+log_every: 50
 
 # dataloader
 num_workers: 16
@@ -37,9 +38,9 @@ num_workers_val: 16
 prefetch_factor: 2
 
 # loss weights
-lambda_l1: 1.0
-lambda_lpips: 0.4
-lambda_uv: 0.8        # starting weight for chroma loss
+lambda_l1: 0.25
+lambda_lpips: 0.75
+lambda_uv: 4.0        # starting weight for chroma loss
 
 # aug
 crop_size: 256
