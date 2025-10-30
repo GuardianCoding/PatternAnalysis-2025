@@ -295,6 +295,8 @@ class StatTracker:
             self.fig.savefig(self.svg_path, dpi=150)
         else:
             plt.draw()
+            self.ax_train.legend(loc="upper right")
+            self.ax_val.legend(loc="upper right")
             plt.pause(0.001)
 
         self._last_redraw_step = self.steps[-1] if self.steps else self._last_redraw_step
@@ -320,32 +322,43 @@ class StatTracker:
         self.ax_train = self.fig.add_subplot(1, 2, 1)
         self.ax_val = self.fig.add_subplot(1, 2, 2)
 
+        # ----- Training panel -----
         (l1_line,) = self.ax_train.plot([], [], label="L1")
         (lp_line,) = self.ax_train.plot([], [], label="LPIPS")
         (uv_line,) = self.ax_train.plot([], [], label="UV")
         (tot_line,) = self.ax_train.plot([], [], label="Total")
         (lr_line,) = self.ax_train.plot([], [], label="LR (scaled)")
 
-        self.lines["l1"] = l1_line
-        self.lines["lp"] = lp_line
-        self.lines["uv"] = uv_line
-        self.lines["tot"] = tot_line
-        self.lines["lr"] = lr_line
+        self.ax_train.set_title("Training losses / LR")
+        self.ax_train.set_xlabel("Step")
+        self.ax_train.set_ylabel("Loss")
+        self.ax_train.legend(loc="upper right")
 
+        self.lines.update({
+            "l1": l1_line,
+            "lp": lp_line,
+            "uv": uv_line,
+            "tot": tot_line,
+            "lr": lr_line,
+        })
+
+        # ----- Validation panel -----
         (vl1_line,)  = self.ax_val.plot([], [], label="Val L1")
         (vlp_line,)  = self.ax_val.plot([], [], label="Val LPIPS")
         (vuv_line,)  = self.ax_val.plot([], [], label="Val UV")
         (vtot_line,) = self.ax_val.plot([], [], label="Val Total")
 
-        self.lines["val_l1"]  = vl1_line
-        self.lines["val_lp"]  = vlp_line
-        self.lines["val_uv"]  = vuv_line
-        self.lines["val_tot"] = vtot_line
-
         self.ax_val.set_title("Validation losses")
         self.ax_val.set_xlabel("Step")
         self.ax_val.set_ylabel("Loss")
         self.ax_val.legend(loc="upper right")
+
+        self.lines.update({
+            "val_l1": vl1_line,
+            "val_lp": vlp_line,
+            "val_uv": vuv_line,
+            "val_tot": vtot_line,
+        })
 
         if not self._headless:
             plt.draw()
