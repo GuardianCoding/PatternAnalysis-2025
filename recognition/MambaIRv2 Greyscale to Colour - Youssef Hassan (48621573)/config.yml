@@ -9,7 +9,7 @@ exp_defaults: mamba_results
 # ann_root:   /dataset/coco/annotations
 
 # training
-epochs: 4
+epochs: 6
 batch_size: 1            # per-GPU
 train_max_items: 2000
 train_subset_seed: 1337
