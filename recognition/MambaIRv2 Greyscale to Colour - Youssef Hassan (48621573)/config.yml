@@ -12,10 +12,10 @@ exp_defaults: mamba_results
 epochs: 6
 batch_size: 1            # per-GPU
 train_max_items: 2000
-train_subset_seed: 1337
+train_subset_seed: 6767
 val_batch_size: 1
 val_max_items: 64        # cap number of validation images (0 = no cap)
-val_subset_seed: 1337    # seed for deterministic val subset sampling
+val_subset_seed: 6767    # seed for deterministic val subset sampling
 grad_accum: 8            # effective 8
 
 # Hyperparameters
