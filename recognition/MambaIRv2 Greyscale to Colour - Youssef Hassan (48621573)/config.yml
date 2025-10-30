@@ -29,6 +29,7 @@ amp: true
 # Saving
 save_every: 2000
 val_every: 1000
+panel_every: 500
 
 # dataloader
 num_workers: 16

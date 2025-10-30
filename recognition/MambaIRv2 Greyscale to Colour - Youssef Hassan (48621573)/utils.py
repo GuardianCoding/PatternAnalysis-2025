@@ -15,6 +15,8 @@ if os.environ.get("DISPLAY", "") == "" and os.environ.get("MPLBACKEND", "") == "
     matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 # ----------------- Checkpoint IO Utils ------------------
 def save_ckpt(path: Path, model: Module, opt, scaler, step, best_total, ema=None):
@@ -93,6 +95,46 @@ def dynamic_chroma_weighting(epoch: int, total_epochs: int, base_lambda_uv: floa
     progress = max(0.0, min(1.0, (epoch - 1) / max(1, total_epochs - 1)))
     decay = max(0.4, 1.0 - 0.6 * progress)
     return float(base_lambda_uv) * float(decay)
+
+# ----------- Image Panel Drawing Helper------------
+def save_panel_with_titles(imgs_01, titles, out_path):
+    """
+    imgs_01: list of (1,3,H,W) tensors in [0,1]
+    titles : list[str] same length as imgs_01
+    """
+    assert len(imgs_01) == len(titles) and len(imgs_01) > 0
+    pil_imgs = []
+    for t in imgs_01:
+        t = t.squeeze(0).clamp(0,1).permute(1,2,0).cpu().numpy()
+        arr = (t * 255.0).round().astype(np.uint8)
+        pil_imgs.append(Image.fromarray(arr))
+
+    W, H = pil_imgs[0].size
+    N = len(pil_imgs)
+    title_h = max(32, int(0.08 * H))  # title bar height
+    canvas = Image.new("RGB", (W * N, H + title_h), (255, 255, 255))
+    draw = ImageDraw.Draw(canvas, "RGBA")
+
+    # Try a nicer font if system has it; fall back to default
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", size=int(title_h * 0.55))
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Draw per-tile title bars + paste images
+    for i, (img, title) in enumerate(zip(pil_imgs, titles)):
+        x0 = i * W
+        # semi-transparent bar
+        draw.rectangle([(x0, 0), (x0 + W, title_h)], fill=(0, 0, 0, 160))
+        # centered title
+        tw, th = draw.textbbox((0, 0), title, font=font)[2:]
+        tx = x0 + (W - tw) // 2
+        ty = (title_h - th) // 2
+        draw.text((tx, ty), title, font=font, fill=(255, 255, 255))
+        # paste image under the bar
+        canvas.paste(img, (x0, title_h))
+
+    canvas.save(out_path)
 
 # --------- Statistics tracker Utils -------------
 class StatTracker:

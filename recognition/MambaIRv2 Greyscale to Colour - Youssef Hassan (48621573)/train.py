@@ -26,6 +26,7 @@ from modules import build_mambairv2_colorizer
 from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting
 from utils import StatTracker
 from utils import save_ckpt, load_ckpt
+from utils import save_panel_with_titles
 
 # Memory savings
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -267,6 +268,7 @@ def main():
     grad_accum = max(1, int(cfg.get("grad_accum", 1)))
     save_every = int(cfg.get("save_every", 2000))
     val_every  = int(cfg.get("val_every", 1000))
+    panel_every = int(cfg.get("panel_every", 0))
     epochs     = int(cfg.get("epochs", 10))
     lpips_side = int(cfg.get("lpips_side", min(int(cfg.get("crop_size", 128)), 192)))
     lambda_uv = float(cfg.get("lambda_uv", 0.8))
@@ -332,6 +334,28 @@ def main():
                 total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv).item()
                 tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, current_lr)
                 print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
+
+            # ------------- periodic sample panel (rank 0 only) -------------
+            if is_main and (panel_every > 0) and (step % panel_every == 0):
+                with torch.no_grad():
+                    # Take the first sample in the current batch
+                    x0  = x_in[0:1]                 # (1,3,H,W)
+                    y0  = y_tgt[0:1].clamp(0, 1)    # GT
+                    p0  = pred_rgb[0:1].clamp(0, 1) # prediction
+
+                    # Build greyscale (Y) tile from input (robust even if input is replicated grey)
+                    y_lum, _, _ = rgb_to_yuv(x0)    # (1,1,H,W)
+                    gs3 = y_lum.repeat(1, 3, 1, 1).clamp(0, 1)
+
+                    # Save panel
+                    panel_dir = out_root / "panels"
+                    panel_dir.mkdir(parents=True, exist_ok=True)
+                    panel_path = panel_dir / f"step_{step:07d}.jpg"
+                    save_panel_with_titles(
+                        [gs3, y0, p0],
+                        ["Greyscale", "Ground truth", "Model Prediction"],
+                        panel_path
+                    )
 
             # validate (rank 0 only)
             if is_main and step % val_every == 0:
