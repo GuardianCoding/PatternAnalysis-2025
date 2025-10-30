@@ -1,9 +1,13 @@
-# Made with the help of ChatGPT5
-import os
-import csv
-import time
+import torch
+from torch.nn import Module
+import torch.nn.functional as F
+
 from pathlib import Path
+import os, csv, time
 from typing import Optional
+
+from math import log10
+import lpips
 
 import matplotlib
 # Prefer interactive backend if available; otherwise fall back to Agg
@@ -12,7 +16,85 @@ if os.environ.get("DISPLAY", "") == "" and os.environ.get("MPLBACKEND", "") == "
 
 import matplotlib.pyplot as plt
 
+# ----------------- Checkpoint IO Utils ------------------
+def save_ckpt(path: Path, model: Module, opt, scaler, step, best_total, ema=None):
+    """Save model, optimizer, scaler, and EMA state to a checkpoint."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": opt.state_dict(),
+        "scaler": scaler.state_dict() if scaler is not None else None,
+        "step": step,
+        "best_total": best_total,
+        "ema": (ema.shadow if ema is not None else None),
+    }, path)
 
+def load_ckpt(path, model: Module, opt=None, scaler=None):
+    """Load model, optimizer, scaler, and EMA state from a checkpoint."""
+    ck = torch.load(path, map_location="cpu")
+    model.load_state_dict(ck["model"], strict=False)
+    if opt is not None and ck.get("optimizer"):
+        opt.load_state_dict(ck["optimizer"])
+    if scaler is not None and ck.get("scaler") is not None:
+        scaler.load_state_dict(ck["scaler"])
+    step = ck.get("step", 0)
+    best_total = ck.get("best_total", 1e9)
+    ema_sd = ck.get("ema", None)
+    return step, best_total, ema_sd
+
+# ----------------- Metrics Utils --------------------
+_lpips = lpips.LPIPS(net='vgg').eval()
+for p in _lpips.parameters(): p.requires_grad = False
+
+def set_seed(seed):
+    import random, numpy as np
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
+
+def psnr(a, b):
+    mse = F.mse_loss(a, b).item()
+    return 99.0 if mse == 0 else 10*log10(1.0/mse)
+
+def _lpips_device():
+    # current device of the LPIPS module
+    try:
+        return next(_lpips.parameters()).device
+    except StopIteration:
+        return torch.device('cpu')
+
+def lpips_loss(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """
+    a, b expected in [0,1]. We move inputs to the LPIPS module's device
+    and cast to float32 to avoid AMP half-precision issues.
+    """
+    dev = _lpips_device()
+    a = (a * 2 - 1).to(dev, dtype=torch.float32, non_blocking=True)
+    b = (b * 2 - 1).to(dev, dtype=torch.float32, non_blocking=True)
+    return _lpips(a, b).mean()
+
+# --- YUV chroma-aware loss ---
+def rgb_to_yuv(x):
+    r, g, b = x[:,0:1], x[:,1:2], x[:,2:3]
+    y = 0.299*r + 0.587*g + 0.114*b
+    u = 0.492*(b - y)
+    v = 0.877*(r - y)
+    return y, u, v
+
+# --- dynamic chroma weighting ---
+def dynamic_chroma_weighting(epoch: int, total_epochs: int, base_lambda_uv: float) -> float:
+    """
+    Returns a decayed lambda_uv in [0.4*base, 1.0*base] across training.
+    - epoch: 1-based current epoch
+    - total_epochs: total number of epochs
+    - base_lambda_uv: the lambda_uv from the config
+    """
+    if total_epochs <= 0:
+        return float(base_lambda_uv)
+    # fades from 1.0 → 0.4 as epoch goes 1 → total_epochs
+    progress = max(0.0, min(1.0, (epoch - 1) / max(1, total_epochs - 1)))
+    decay = max(0.4, 1.0 - 0.6 * progress)
+    return float(base_lambda_uv) * float(decay)
+
+# --------- Statistics tracker Utils -------------
 class StatTracker:
     """
     Lightweight training/validation tracker with live plots via matplotlib draw().

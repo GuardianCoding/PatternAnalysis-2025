@@ -48,7 +48,7 @@ from torch.cuda.amp import autocast
 from contextlib import nullcontext
 
 from modules import build_mambairv2_colorizer
-from utils.metrics import lpips_loss, psnr as psnr_fn
+from utils import lpips_loss, psnr as psnr_fn
 
 
 # ------------------ helpers ------------------
