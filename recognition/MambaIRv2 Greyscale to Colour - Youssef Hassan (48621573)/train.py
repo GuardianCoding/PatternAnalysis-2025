@@ -322,9 +322,11 @@ def main():
             step += 1
 
             if step % grad_accum == 0:
+                prev = opt._step_count  # PyTorch-internal counter
                 scaler.step(opt)
                 scaler.update()
-                sched.step()
+                if opt._step_count > prev:  # only advance scheduler if we really stepped
+                    sched.step()
                 opt.zero_grad(set_to_none=True)
                 if ema is not None:
                     ema.update(net.module if use_ddp else net)
