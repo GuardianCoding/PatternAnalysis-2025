@@ -470,7 +470,11 @@ def main():
         if is_main:
             print(f"[resume] loading {cfg['resume']}")
         _model = net.module if use_ddp else net
-        step, best_total, ema_sd = load_ckpt(cfg["resume"], _model, opt, scaler)
+        
+        # Use a dummy optimizer for state restoration; real opt/sched are created per stage below
+        opt_dummy = AdamW(_model.parameters(), lr=1e-6)
+        step, best_total, ema_sd = load_ckpt(cfg["resume"], _model, opt_dummy, scaler)
+
         if ema_sd is not None and ema is not None:
             ema.shadow = ema_sd
         if is_main:

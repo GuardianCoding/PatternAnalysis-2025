@@ -324,7 +324,7 @@ class StatTracker:
 
         if self.is_main:
             self._append_csv(step,
-                            loss_l1=None, loss_lp=None, loss_uv=None, total_loss=None, lr=None,
+                            loss_l1=None, loss_lp=None, loss_uv=None, total_loss=None, lr=None, lambda_uv_eff=None,
                             val_l1=loss_l1, val_lp=loss_lp, val_uv=loss_uv, val_total=loss_total)
             self.redraw(force=True)
 
