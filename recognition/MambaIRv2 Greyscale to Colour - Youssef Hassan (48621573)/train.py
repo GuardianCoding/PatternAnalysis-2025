@@ -27,7 +27,7 @@ from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weigh
 from utils import StatTracker
 from utils import save_ckpt, load_ckpt
 from utils import save_panel_with_titles
-from utils import freeze_all_but_last
+from utils import freeze_all_but_last, charbonnier
 
 # Memory savings
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -161,10 +161,6 @@ def run_training_epochs(
     w_lp         = float(cfg.get("lambda_lpips", 0.4))
     log_every    = int(cfg.get("log_every", 100))
     use_amp      = bool(cfg.get("amp", True))
-
-    # helpers
-    def charbonnier(x, y, eps=1e-3):
-        return torch.mean(torch.sqrt((x - y)**2 + eps**2))
 
     train_wall_start = time.time()
 
@@ -451,9 +447,6 @@ def main():
     torch.cuda.reset_peak_memory_stats() # More memory checking
 
     # --------------------- losses/optim/sched ---------------------
-    def charbonnier(x, y, eps=1e-3):
-        return torch.mean(torch.sqrt((x - y)**2 + eps**2))
-
     opt = AdamW(net.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.0)))
     scaler = GradScaler(enabled=bool(cfg.get("amp", True)))
 

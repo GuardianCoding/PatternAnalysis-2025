@@ -18,6 +18,10 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
+# ------------------- Charbonnier loss ------------------------
+def charbonnier(x, y, eps=1e-3):
+        return torch.mean(torch.sqrt((x - y)**2 + eps**2))
+
 # ----------------- Checkpoint IO Utils ------------------
 def save_ckpt(path: Path, model: Module, opt, scaler, step, best_total, ema=None):
     """Save model, optimizer, scaler, and EMA state to a checkpoint."""
