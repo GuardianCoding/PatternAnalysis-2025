@@ -8,22 +8,29 @@ exp_defaults: mamba_results
 # val_root:   /dataset/coco/val2017
 # ann_root:   /dataset/coco/annotations
 
-# training
+# Two-layer knobs
 epochs: 10
+stage1_epochs: 3            # how many epochs to run with partial unfreezing
+stage1_last_k_blocks: 2     # unfreeze heads + last K blocks in Stage 1
+
+# Training
 batch_size: 1            # per-GPU
 train_max_items: 2000
 train_subset_seed: 6767
+grad_accum: 4            # effective 8
+
+# Validation
 val_batch_size: 1
 val_max_items: 64        # cap number of validation images (0 = no cap)
 val_subset_seed: 6767    # seed for deterministic val subset sampling
-grad_accum: 8            # effective 8
 
 # Hyperparameters
+stage1_lr: 3e-4 # Stage 1 lr
 lr: 2.0e-4
-min_lr: 1.0e-5
+min_lr: 1.0e-7
 weight_decay: 0.005
-ema_decay: 0.999
-warmup_steps: 1500
+ema_decay: 0.9995
+warmup_steps: 500
 amp: true
 
 # Saving
@@ -41,7 +48,7 @@ prefetch_factor: 2
 lambda_l1: 0.15
 lambda_lpips: 0.6
 lambda_uv: 10.0            # starting weight for chroma loss
-lambda_uv_min: 0.6        # floor value at the final epoch (>= 0.0)
+lambda_uv_min: 0.6         # floor value at the final epoch (>= 0.0)
 lambda_uv_schedule: cosine # options: cosine | dynamic
 
 # aug
@@ -51,7 +58,7 @@ rgb_jitter_prob: 0.3
 rgb_jitter_strength: 0.15
 uv_input_dither: true      # Adding nudges to yuv colours
 uv_dither_std: 0.02        # std of U/V noise
-lpips_side: 192            # LPIPS downsample
+lpips_side: 160            # LPIPS downsample
 
 # model
 model:

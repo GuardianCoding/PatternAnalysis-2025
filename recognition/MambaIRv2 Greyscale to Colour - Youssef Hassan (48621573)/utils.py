@@ -155,6 +155,27 @@ def save_panel_with_titles(imgs_01, titles, out_path):
 
     canvas.save(out_path)
 
+# --------- Locking Middle Layer Helper -----------
+def freeze_all_but_last(net, last_k_blocks=0, extra_modules=("conv_first","conv_after_body","conv_last")):
+    for p in net.parameters():
+        p.requires_grad = False
+
+    # always train these light heads
+    for name in extra_modules:
+        if hasattr(net, name):
+            for p in getattr(net, name).parameters():
+                p.requires_grad = True
+
+    # optionally train last K high-level blocks (if model exposes them as a list/ModuleList)
+    if hasattr(net, "layers") and isinstance(net.layers, torch.nn.ModuleList) and last_k_blocks > 0:
+        for m in net.layers[-last_k_blocks:]:
+            for p in m.parameters():
+                p.requires_grad = True
+
+    # sanity: print trainable parameter count
+    n_train = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    print(f"Trainable params: {n_train:,}")
+
 # --------- Statistics tracker Utils -------------
 class StatTracker:
     """

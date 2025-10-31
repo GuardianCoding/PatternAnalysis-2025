@@ -27,6 +27,7 @@ from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weigh
 from utils import StatTracker
 from utils import save_ckpt, load_ckpt
 from utils import save_panel_with_titles
+from utils import freeze_all_but_last
 
 # Memory savings
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -138,8 +139,217 @@ def cosine_decay_lambda_uv(epoch: int, total_epochs: int, start: float, end: flo
     t = (epoch - 1) / float(total_epochs - 1)
     return float(end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * t)))
 
-# --------------------- main ---------------------
+def run_training_epochs(
+    net, opt, sched, scaler, ema,
+    train_loader, eval_loader, train_samp,
+    cfg, device, out_root, tracker,
+    is_main, use_ddp,
+    start_epoch, end_epoch, total_epochs,
+    global_step, best_total
+):
+    """Runs epochs [start_epoch, end_epoch] inclusive with original inner loop."""
+    # pull frequently used cfg knobs once
+    grad_accum   = max(1, int(cfg.get("grad_accum", 1)))
+    save_every   = int(cfg.get("save_every", 2000))
+    val_every    = int(cfg.get("val_every", 1000))
+    panel_every  = int(cfg.get("panel_every", 0))
+    lpips_side   = int(cfg.get("lpips_side", min(int(cfg.get("crop_size", 128)), 192)))
+    lambda_uv    = float(cfg.get("lambda_uv", 0.8))
+    lambda_uv_min = float(cfg.get("lambda_uv_min", 0.0))
+    lambda_uv_sched = str(cfg.get("lambda_uv_schedule", "dynamic")).lower()
+    w_l1         = float(cfg.get("lambda_l1", 1.0))
+    w_lp         = float(cfg.get("lambda_lpips", 0.4))
+    log_every    = int(cfg.get("log_every", 100))
+    use_amp      = bool(cfg.get("amp", True))
 
+    # helpers
+    def charbonnier(x, y, eps=1e-3):
+        return torch.mean(torch.sqrt((x - y)**2 + eps**2))
+
+    train_wall_start = time.time()
+
+    if use_ddp and train_samp is not None:
+        train_samp.set_epoch(start_epoch)
+
+    for epoch in range(start_epoch, end_epoch + 1):
+        if use_ddp and train_samp is not None:
+            train_samp.set_epoch(epoch)
+
+        # ---- epoch timing start ----
+        epoch_start = time.time()
+        steps_in_epoch = 0
+
+        net.train()
+        opt.zero_grad(set_to_none=True)
+
+        for x_in, y_tgt, _ in train_loader:
+            steps_in_epoch += 1
+
+            x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
+            y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
+
+            # Chroma nudge to break grey copying
+            if cfg.get("uv_input_dither", True) and net.training:
+                with torch.no_grad():
+                    y, u, v = rgb_to_yuv(x_in)  # (B,1,H,W)
+                    std = float(cfg.get("uv_dither_std", 0.01))
+                    if std > 0:
+                        u = u + std * torch.randn_like(u)
+                        v = v + std * torch.randn_like(v)
+                        x_in = yuv_to_rgb(y, u, v, clamp=True).contiguous(memory_format=torch.channels_last)
+
+            with autocast(enabled=use_amp):
+                pred_rgb = net(x_in)
+                loss_l1  = charbonnier(pred_rgb, y_tgt)
+
+                pr_s = F.interpolate(pred_rgb,  size=lpips_side, mode="bilinear", align_corners=False)
+                gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
+                loss_lp = lpips_loss(pr_s, gt_s)
+                
+                _, u1, v1 = rgb_to_yuv(pred_rgb)
+                _, u2, v2 = rgb_to_yuv(y_tgt)
+                loss_uv = F.l1_loss(u1, u2) + F.l1_loss(v1, v2)
+
+                # per-epoch UV weight uses TOTAL epochs for smooth schedule across both stages
+                if lambda_uv_sched == "cosine":
+                    lambda_uv_eff = cosine_decay_lambda_uv(epoch, total_epochs, lambda_uv, lambda_uv_min)
+                else:
+                    lambda_uv_eff = dynamic_chroma_weighting(epoch, total_epochs, lambda_uv)
+
+                loss = (
+                    w_l1 * loss_l1 +
+                    w_lp * loss_lp +
+                    lambda_uv_eff * loss_uv
+                ) / grad_accum
+
+            scaler.scale(loss).backward()
+            global_step += 1
+
+            if global_step % grad_accum == 0:
+                prev = opt._step_count  # PyTorch-internal counter
+                scaler.step(opt)
+                scaler.update()
+                if opt._step_count > prev:  # only advance scheduler if we really stepped
+                    sched.step()
+                opt.zero_grad(set_to_none=True)
+                if ema is not None:
+                    ema.update(net.module if use_ddp else net)
+
+            # lightweight log (rank 0 only)
+            if is_main and global_step % log_every == 0:
+                current_lr = opt.param_groups[0]["lr"]
+                total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv).item()
+                tracker.log_train(global_step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, lambda_uv_eff=float(lambda_uv_eff))
+                print(f"[{epoch}] step={global_step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
+
+            # ------------- periodic sample panel (rank 0 only) -------------
+            if is_main and (panel_every > 0) and (global_step % panel_every == 0):
+                with torch.no_grad():
+                    # Take the first sample in the current batch
+                    x0  = x_in[0:1]                 # (1,3,H,W)
+                    y0  = y_tgt[0:1].clamp(0, 1)    # GT
+                    p0  = pred_rgb[0:1].clamp(0, 1) # prediction
+
+                    # Build greyscale (Y) tile from input (robust even if input is replicated grey)
+                    y_lum, _, _ = rgb_to_yuv(x0)    # (1,1,H,W)
+                    gs3 = y_lum.repeat(1, 3, 1, 1).clamp(0, 1)
+
+                    # Save panel
+                    panel_dir = out_root / "panels"
+                    panel_dir.mkdir(parents=True, exist_ok=True)
+                    panel_path = panel_dir / f"step_{global_step:07d}.jpg"
+                    save_panel_with_titles(
+                        [gs3, y0, p0],
+                        ["Greyscale", "Ground truth", "Model Prediction"],
+                        panel_path
+                    )
+
+            # validate (rank 0 only)
+            if is_main and val_every > 0 and global_step % val_every == 0:
+                net.eval()
+                if ema is not None:
+                    bak = (net.module if use_ddp else net).state_dict()
+                    ema.apply_to(net.module if use_ddp else net)
+
+                # accumulators
+                val_l1, val_lp, val_uv, val_total, n_count = 0.0, 0.0, 0.0, 0.0, 0
+
+                with torch.no_grad():
+                    for x_v, y_v, _ in eval_loader:
+                        x_v  = x_v.to(device)
+                        y_v  = y_v.to(device)
+
+                        pred_v = net(x_v)
+
+                        # L1/Charbonnier (same as train)
+                        l1 = charbonnier(pred_v, y_v).item()
+
+                        # LPIPS on resized tensors (same size used in train)
+                        pr_s = F.interpolate(pred_v, size=lpips_side, mode="bilinear", align_corners=False)
+                        gt_s = F.interpolate(y_v,   size=lpips_side, mode="bilinear", align_corners=False)
+                        lp = lpips_loss(pr_s, gt_s).item()
+
+                        # UV chroma-only term (same as train)
+                        _, u1, v1 = rgb_to_yuv(pred_v)
+                        _, u2, v2 = rgb_to_yuv(y_v)
+                        uv = (F.l1_loss(u1, u2) + F.l1_loss(v1, v2)).item()
+
+                        # per-epoch UV weight (match train-side choice, using total_epochs)
+                        if lambda_uv_sched == "cosine":
+                            lambda_uv_eff_v = cosine_decay_lambda_uv(epoch, total_epochs, lambda_uv, lambda_uv_min)
+                        else:
+                            lambda_uv_eff_v = dynamic_chroma_weighting(epoch, total_epochs, lambda_uv)
+
+                        # accumulate raw components + weighted total
+                        val_l1   += l1
+                        val_lp   += lp
+                        val_uv   += uv
+                        val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff_v * uv)
+                        n_count  += 1
+
+                # means
+                avg_l1    = val_l1 / max(n_count, 1)
+                avg_lp    = val_lp / max(n_count, 1)
+                avg_uv    = val_uv / max(n_count, 1)
+                avg_total = val_total / max(n_count, 1)
+
+                if is_main:
+                    tracker.log_val(global_step, avg_l1, avg_lp, avg_uv, avg_total)
+                    print(f"[val] step={global_step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} TOTAL={avg_total:.4f}")
+
+                if ema is not None:
+                    (net.module if use_ddp else net).load_state_dict(bak, strict=False)
+                net.train()
+
+                # select best by TOTAL (more stable than LPIPS-alone for colorization)
+                if avg_total < best_total and is_main:
+                    best_total = avg_total
+                    save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
+                              opt, scaler, global_step, best_total, ema)
+
+            # periodic checkpoint (rank 0 only)
+            if is_main and save_every > 0 and global_step % save_every == 0:
+                save_ckpt(out_root/f"step_{global_step}.ckpt", net.module if use_ddp else net, opt, scaler, global_step, best_total, ema)
+
+            if global_step % 25 == 0:
+                torch.cuda.empty_cache()
+
+        # ---- epoch timing end ----
+        if is_main:
+            epoch_dur = time.time() - epoch_start
+            steps_per_sec = steps_in_epoch / max(epoch_dur, 1e-9)
+            tracker.log_epoch(epoch=epoch, duration_sec=epoch_dur,
+                              steps=steps_in_epoch, steps_per_sec=steps_per_sec)
+            print(f"[epoch {epoch}] duration={epoch_dur:.2f}s  steps={steps_in_epoch}  {steps_per_sec:.2f} steps/s")
+
+    # ---- stage timing end ----
+    if is_main:
+        total_dur = time.time() - train_wall_start
+        print(f"[stage done] wall_time={total_dur/60.0:.2f} min  ({total_dur:.2f}s)")
+
+    return global_step, best_total
+
+# --------------------- main ---------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
@@ -276,206 +486,57 @@ def main():
         if is_main:
             print(f"[resume] step={step} best_total_loss={best_total:.4f}")
 
-    # --------------------- train ---------------------
-    grad_accum = max(1, int(cfg.get("grad_accum", 1)))
-    save_every = int(cfg.get("save_every", 2000))
-    val_every  = int(cfg.get("val_every", 1000))
-    panel_every = int(cfg.get("panel_every", 0))
-    epochs     = int(cfg.get("epochs", 10))
-    lpips_side = int(cfg.get("lpips_side", min(int(cfg.get("crop_size", 128)), 192)))
-    lambda_uv = float(cfg.get("lambda_uv", 0.8))
-    lambda_uv_min = float(cfg.get("lambda_uv_min", 0.0))
-    lambda_uv_sched = str(cfg.get("lambda_uv_schedule", "dynamic")).lower()
-    w_l1 = float(cfg.get("lambda_l1", 1.0))
-    w_lp = float(cfg.get("lambda_lpips", 0.4))
+    # --------------------- TWO-STAGE TRAINING ---------------------
+    total_epochs     = int(cfg.get("epochs", 10))
+    stage1_epochs    = int(cfg.get("stage1_epochs", 3))
+    last_k_blocks    = int(cfg.get("stage1_last_k_blocks", 2))
+    stage1_lr        = float(cfg.get("stage1_lr", 3e-4))
+    stage2_lr        = float(cfg.get("lr", 5e-5))
+    weight_decay     = float(cfg.get("weight_decay", 1e-4))
+    min_lr           = float(cfg.get("min_lr", 1e-5))
+    warmup_steps     = int(cfg.get("warmup_steps", 500))
 
-    if use_ddp and train_samp is not None:
-        train_samp.set_epoch(1)
+    if stage1_epochs > 0:
+        # ---- Stage 1: freeze all but heads + last K blocks ----
+        print(f"\n=== Stage 1: freeze all but heads + last {last_k_blocks} blocks for {stage1_epochs} epochs ===")
+        freeze_all_but_last(net.module if use_ddp else net, last_k_blocks=last_k_blocks)
 
-    train_wall_start = time.time() # total run start (wall)
+        opt = AdamW(filter(lambda p: p.requires_grad, (net.parameters() if not use_ddp else net.module.parameters())),
+                    lr=stage1_lr, weight_decay=weight_decay)
+        total_steps_s1 = stage1_epochs * max(1, len(train_loader)) // max(1, int(cfg.get("grad_accum", 1)))
+        sched = WarmupCosine(opt, base_lr=stage1_lr, warmup_steps=warmup_steps, max_steps=total_steps_s1, min_lr=min_lr)
 
-    for epoch in range(1, epochs + 1):
-        if use_ddp and train_samp is not None:
-            train_samp.set_epoch(epoch)
+        step, best_total = run_training_epochs(
+            net=net, opt=opt, sched=sched, scaler=scaler, ema=ema,
+            train_loader=train_loader, eval_loader=eval_loader, train_samp=train_samp,
+            cfg=cfg, device=device, out_root=out_root, tracker=tracker,
+            is_main=is_main, use_ddp=use_ddp,
+            start_epoch=1, end_epoch=stage1_epochs, total_epochs=total_epochs,
+            global_step=step, best_total=best_total
+        )
 
-        # ---- epoch timing start ----
-        epoch_start = time.time()
-        steps_in_epoch = 0
+    # ---- Stage 2: unfreeze all and continue ----
+    if total_epochs > stage1_epochs:
+        print(f"\n=== Stage 2: unfreeze ALL layers for remaining {total_epochs - stage1_epochs} epochs ===")
+        for p in (net.module if use_ddp else net).parameters():
+            p.requires_grad = True
 
-        net.train()
-        opt.zero_grad(set_to_none=True)
+        opt = AdamW((net.parameters() if not use_ddp else net.module.parameters()),
+                    lr=stage2_lr, weight_decay=weight_decay)
+        total_steps_s2 = (total_epochs - stage1_epochs) * max(1, len(train_loader)) // max(1, int(cfg.get("grad_accum", 1)))
+        sched = WarmupCosine(opt, base_lr=stage2_lr, warmup_steps=warmup_steps, max_steps=total_steps_s2, min_lr=min_lr)
 
-        for x_in, y_tgt, _ in train_loader:
-            steps_in_epoch += 1      # per-epoch step counter
+        step, best_total = run_training_epochs(
+            net=net, opt=opt, sched=sched, scaler=scaler, ema=ema,
+            train_loader=train_loader, eval_loader=eval_loader, train_samp=train_samp,
+            cfg=cfg, device=device, out_root=out_root, tracker=tracker,
+            is_main=is_main, use_ddp=use_ddp,
+            start_epoch=stage1_epochs + 1, end_epoch=total_epochs, total_epochs=total_epochs,
+            global_step=step, best_total=best_total
+        )
 
-            x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
-            y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
-
-            # Chroma nudge to break grey copying
-            if cfg.get("uv_input_dither", True) and net.training:
-                with torch.no_grad():
-                    y, u, v = rgb_to_yuv(x_in)  # (B,1,H,W)
-                    std = float(cfg.get("uv_dither_std", 0.01))
-                    if std > 0:
-                        u = u + std * torch.randn_like(u)
-                        v = v + std * torch.randn_like(v)
-                        x_in = yuv_to_rgb(y, u, v, clamp=True).contiguous(memory_format=torch.channels_last)
-
-            with autocast(enabled=bool(cfg.get("amp", True))):
-                pred_rgb = net(x_in)
-                loss_l1  = charbonnier(pred_rgb, y_tgt)
-
-                pr_s = F.interpolate(pred_rgb,  size=lpips_side, mode="bilinear", align_corners=False)
-                gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
-                loss_lp = lpips_loss(pr_s, gt_s)
-                
-                _, u1, v1 = rgb_to_yuv(pred_rgb)
-                _, u2, v2 = rgb_to_yuv(y_tgt)
-                loss_uv = F.l1_loss(u1, u2) + F.l1_loss(v1, v2)
-
-                # per-epoch UV weight
-                if lambda_uv_sched == "cosine":
-                    lambda_uv_eff = cosine_decay_lambda_uv(epoch, epochs, lambda_uv, lambda_uv_min)
-                else:
-                    # fallback to existing helper
-                    lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
-
-                loss = (
-                    w_l1 * loss_l1 +
-                    w_lp * loss_lp +
-                    lambda_uv_eff * loss_uv
-                ) / grad_accum
-
-            scaler.scale(loss).backward()
-            step += 1
-
-            if step % grad_accum == 0:
-                prev = opt._step_count  # PyTorch-internal counter
-                scaler.step(opt)
-                scaler.update()
-                if opt._step_count > prev:  # only advance scheduler if we really stepped
-                    sched.step()
-                opt.zero_grad(set_to_none=True)
-                if ema is not None:
-                    ema.update(net.module if use_ddp else net)
-
-            # lightweight log (rank 0 only)
-            if is_main and step % int(cfg.get("log_every", 100)) == 0:
-                current_lr = opt.param_groups[0]["lr"]
-                total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv).item()
-                tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, lambda_uv_eff=float(lambda_uv_eff))
-                print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
-
-            # ------------- periodic sample panel (rank 0 only) -------------
-            if is_main and (panel_every > 0) and (step % panel_every == 0):
-                with torch.no_grad():
-                    # Take the first sample in the current batch
-                    x0  = x_in[0:1]                 # (1,3,H,W)
-                    y0  = y_tgt[0:1].clamp(0, 1)    # GT
-                    p0  = pred_rgb[0:1].clamp(0, 1) # prediction
-
-                    # Build greyscale (Y) tile from input (robust even if input is replicated grey)
-                    y_lum, _, _ = rgb_to_yuv(x0)    # (1,1,H,W)
-                    gs3 = y_lum.repeat(1, 3, 1, 1).clamp(0, 1)
-
-                    # Save panel
-                    panel_dir = out_root / "panels"
-                    panel_dir.mkdir(parents=True, exist_ok=True)
-                    panel_path = panel_dir / f"step_{step:07d}.jpg"
-                    save_panel_with_titles(
-                        [gs3, y0, p0],
-                        ["Greyscale", "Ground truth", "Model Prediction"],
-                        panel_path
-                    )
-
-            # validate (rank 0 only)
-            if is_main and step % val_every == 0:
-                net.eval()
-                if ema is not None:
-                    bak = (net.module if use_ddp else net).state_dict()
-                    ema.apply_to(net.module if use_ddp else net)
-
-                # accumulators
-                val_l1, val_lp, val_uv, val_total, n_count = 0.0, 0.0, 0.0, 0.0, 0
-
-                with torch.no_grad():
-                    for x_in, y_tgt, _ in eval_loader:
-                        x_in  = x_in.to(device)
-                        y_tgt = y_tgt.to(device)
-
-                        pred_rgb = net(x_in)
-
-                        # L1/Charbonnier (same as train)
-                        l1 = charbonnier(pred_rgb, y_tgt).item()
-
-                        # LPIPS on resized tensors (same size used in train)
-                        pr_s = F.interpolate(pred_rgb, size=lpips_side, mode="bilinear", align_corners=False)
-                        gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
-                        lp = lpips_loss(pr_s, gt_s).item()
-
-                        # UV chroma-only term (same as train)
-                        _, u1, v1 = rgb_to_yuv(pred_rgb)
-                        _, u2, v2 = rgb_to_yuv(y_tgt)
-                        uv = (F.l1_loss(u1, u2) + F.l1_loss(v1, v2)).item()
-
-                        # per-epoch UV weight (match train-side choice)
-                        if lambda_uv_sched == "cosine":
-                            lambda_uv_eff = cosine_decay_lambda_uv(epoch, epochs, lambda_uv, lambda_uv_min)
-                        else:
-                            lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
-
-                        # accumulate raw components + weighted total
-                        val_l1   += l1
-                        val_lp   += lp
-                        val_uv   += uv
-                        val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff * uv)
-                        n_count  += 1
-
-                # means
-                avg_l1    = val_l1 / max(n_count, 1)
-                avg_lp    = val_lp / max(n_count, 1)
-                avg_uv    = val_uv / max(n_count, 1)
-                avg_total = val_total / max(n_count, 1)
-
-                if is_main:
-                    tracker.log_val(step, avg_l1, avg_lp, avg_uv, avg_total)
-                if lambda_uv_sched == "cosine":
-                    lambda_uv_dbg = cosine_decay_lambda_uv(epoch, epochs, lambda_uv, lambda_uv_min)
-                else:
-                    lambda_uv_dbg = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
-                print(f"[val] step={step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} lambda_uv={lambda_uv_dbg:.3f} TOTAL={avg_total:.4f}")
-
-                if ema is not None:
-                    (net.module if use_ddp else net).load_state_dict(bak, strict=False)
-                net.train()
-
-                # select best by LPIPS
-                if avg_total < best_total:
-                    best_total = avg_total
-                    save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
-                            opt, scaler, step, best_total, ema)
-
-
-            # periodic checkpoint (rank 0 only)
-            if is_main and step % save_every == 0:
-                save_ckpt(out_root/f"step_{step}.ckpt", net.module if use_ddp else net, opt, scaler, step, best_total, ema)
-
-            if step % 25 == 0:
-                torch.cuda.empty_cache()
-
-        # ---- epoch timing end ----
-        if is_main:
-            epoch_dur = time.time() - epoch_start
-            steps_per_sec = steps_in_epoch / max(epoch_dur, 1e-9)
-            tracker.log_epoch(epoch=epoch, duration_sec=epoch_dur,
-                              steps=steps_in_epoch, steps_per_sec=steps_per_sec)
-            print(f"[epoch {epoch}] duration={epoch_dur:.2f}s  steps={steps_in_epoch}  {steps_per_sec:.2f} steps/s")
-
-    # ---- total timing end ----
+    # ---- finish / teardown ----
     if is_main:
-        total_dur = time.time() - train_wall_start
-        tracker.end_run(total_duration_sec=total_dur)
-        print(f"[training done] total_wall_time={total_dur/60.0:.2f} min  ({total_dur:.2f}s)")
         tracker.save_fig()
         tracker.close()
 
