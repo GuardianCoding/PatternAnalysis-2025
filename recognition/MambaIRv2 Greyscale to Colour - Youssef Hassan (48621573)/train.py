@@ -126,6 +126,18 @@ class WarmupCosine(torch.optim.lr_scheduler._LRScheduler):
         cos = 0.5 * (1 + math.cos(math.pi * min(1.0, max(0.0, t))))
         return [self.min_lr + (self.base_lr - self.min_lr) * cos for _ in self.optimizer.param_groups]
 
+# --------------------- lambda_uv cosine schedule ---------------------
+def cosine_decay_lambda_uv(epoch: int, total_epochs: int, start: float, end: float = 0.0) -> float:
+    """
+    Cosine decay from `start` at epoch 1 to `end` at epoch `total_epochs`.
+    Smooth and monotonic: w_e = end + (start - end) * 0.5 * (1 + cos(pi * t)),
+    with t in [0,1] mapping 1..total_epochs -> 0..1.
+    """
+    if total_epochs <= 1:
+        return float(end)
+    t = (epoch - 1) / float(total_epochs - 1)
+    return float(end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * t)))
+
 # --------------------- main ---------------------
 
 def main():
@@ -272,6 +284,8 @@ def main():
     epochs     = int(cfg.get("epochs", 10))
     lpips_side = int(cfg.get("lpips_side", min(int(cfg.get("crop_size", 128)), 192)))
     lambda_uv = float(cfg.get("lambda_uv", 0.8))
+    lambda_uv_min = float(cfg.get("lambda_uv_min", 0.0))
+    lambda_uv_sched = str(cfg.get("lambda_uv_schedule", "dynamic")).lower()
     w_l1 = float(cfg.get("lambda_l1", 1.0))
     w_lp = float(cfg.get("lambda_lpips", 0.4))
 
@@ -319,8 +333,12 @@ def main():
                 _, u2, v2 = rgb_to_yuv(y_tgt)
                 loss_uv = F.l1_loss(u1, u2) + F.l1_loss(v1, v2)
 
-                # dynamic UV weight (per-epoch)
-                lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
+                # per-epoch UV weight
+                if lambda_uv_sched == "cosine":
+                    lambda_uv_eff = cosine_decay_lambda_uv(epoch, epochs, lambda_uv, lambda_uv_min)
+                else:
+                    # fallback to existing helper
+                    lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
 
                 loss = (
                     w_l1 * loss_l1 +
@@ -400,8 +418,11 @@ def main():
                         _, u2, v2 = rgb_to_yuv(y_tgt)
                         uv = (F.l1_loss(u1, u2) + F.l1_loss(v1, v2)).item()
 
-                        # per-epoch dynamic weight
-                        lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
+                        # per-epoch UV weight (match train-side choice)
+                        if lambda_uv_sched == "cosine":
+                            lambda_uv_eff = cosine_decay_lambda_uv(epoch, epochs, lambda_uv, lambda_uv_min)
+                        else:
+                            lambda_uv_eff = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
 
                         # accumulate raw components + weighted total
                         val_l1   += l1
@@ -418,8 +439,11 @@ def main():
 
                 if is_main:
                     tracker.log_val(step, avg_l1, avg_lp, avg_uv, avg_total)
-
-                print(f"[val] step={step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} lambda_uv={dynamic_chroma_weighting(epoch, epochs, lambda_uv):.3f} TOTAL={avg_total:.4f}")
+                if lambda_uv_sched == "cosine":
+                    lambda_uv_dbg = cosine_decay_lambda_uv(epoch, epochs, lambda_uv, lambda_uv_min)
+                else:
+                    lambda_uv_dbg = dynamic_chroma_weighting(epoch, epochs, lambda_uv)
+                print(f"[val] step={step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} lambda_uv={lambda_uv_dbg:.3f} TOTAL={avg_total:.4f}")
 
                 if ema is not None:
                     (net.module if use_ddp else net).load_state_dict(bak, strict=False)

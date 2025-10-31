@@ -41,6 +41,8 @@ prefetch_factor: 2
 lambda_l1: 0.05
 lambda_lpips: 0.9
 lambda_uv: 10.0            # starting weight for chroma loss
+lambda_uv_min: 0.05        # floor value at the final epoch (>= 0.0)
+lambda_uv_schedule: cosine # options: cosine | dynamic
 
 # aug
 crop_size: 256
