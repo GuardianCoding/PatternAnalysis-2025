@@ -7,12 +7,16 @@ from torchvision.datasets import CocoDetection
 import torchvision.transforms.functional as F
 from torchvision import transforms
 from torchvision.datasets.utils import download_url
+import torch.distributed as dist
 from PIL import Image
 
 __all__ = [
     "CocoColorisationTrain",
     "CocoColorisationEval",
     "build_coco_dataloaders",
+    "sample_pool_indices",
+    "sample_epoch_indices",
+    "build_epoch_subset_loader",
 ]
 
 # ------------------------ URLs & auto-download helpers ------------------------
@@ -352,3 +356,59 @@ def build_coco_dataloaders(
     )
 
     return train_loader, eval_loader, train_sampler, eval_sampler
+
+# ------------------------ epoch-wise subset helpers ------------------------
+def sample_pool_indices(ds_len: int, pool_size: int, seed: int) -> list[int]:
+    """
+    Deterministically pick a fixed pool of indices from a dataset of length ds_len.
+    Returns a sorted list of length <= pool_size.
+    """
+    pool_size = max(0, min(int(pool_size), int(ds_len)))
+    rng = random.Random(int(seed))
+    idxs = list(range(ds_len))
+    rng.shuffle(idxs)
+    return sorted(idxs[:pool_size])
+
+def sample_epoch_indices(pool_indices: list[int], subset_size: int, seed: int, epoch: int) -> list[int]:
+    """
+    Deterministically pick a different random subset from the fixed pool for each epoch.
+    Uses (seed + epoch) so all ranks agree, then returns a sorted list for stable logs.
+    """
+    if not pool_indices:
+        return []
+    subset_size = max(0, min(int(subset_size), len(pool_indices)))
+    rng = random.Random(int(seed) + int(epoch))
+    idxs = list(pool_indices)
+    rng.shuffle(idxs)
+    return sorted(idxs[:subset_size])
+
+def build_epoch_subset_loader(base_train_ds, epoch_indices: list[int], cfg: dict, use_ddp: bool, rank: int,):
+    """
+    Build a DataLoader over an epoch-specific Subset(base_train_ds, epoch_indices).
+    DDP-safe via DistributedSampler.
+    """
+    subset = Subset(base_train_ds, epoch_indices)
+
+    train_sampler = None
+    if use_ddp:
+        train_sampler = DistributedSampler(
+            subset,
+            shuffle=True,
+            drop_last=False,
+            rank=rank,
+            num_replicas=dist.get_world_size() if torch.distributed.is_initialized() else 1,
+        )
+
+    nworkers_train = max(1, int(cfg.get("num_workers", 6)))
+    loader = DataLoader(
+        subset,
+        batch_size=int(cfg.get("batch_size", 10)),
+        shuffle=(not use_ddp),
+        sampler=train_sampler,
+        num_workers=nworkers_train,
+        pin_memory=True,
+        persistent_workers=(nworkers_train > 0),
+        prefetch_factor=int(cfg.get("prefetch_factor", 4)),
+        worker_init_fn=_worker_init_fn,
+    )
+    return loader, train_sampler

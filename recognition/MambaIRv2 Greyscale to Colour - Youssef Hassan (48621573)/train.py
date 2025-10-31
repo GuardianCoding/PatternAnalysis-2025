@@ -21,9 +21,9 @@ from torch.cuda.amp import autocast, GradScaler
 from torch.optim import AdamW
 import torch.nn.functional as F
 
-from dataset import build_coco_dataloaders
+from dataset import build_coco_dataloaders, sample_pool_indices, sample_epoch_indices, build_epoch_subset_loader
 from modules import build_mambairv2_colorizer
-from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting, rgb_to_yuv, yuv_to_rgb
+from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting, yuv_to_rgb
 from utils import StatTracker
 from utils import save_ckpt, load_ckpt
 from utils import save_panel_with_titles
@@ -141,11 +141,10 @@ def cosine_decay_lambda_uv(epoch: int, total_epochs: int, start: float, end: flo
 
 def run_training_epochs(
     net, opt, sched, scaler, ema,
-    train_loader, eval_loader, train_samp,
-    cfg, device, out_root, tracker,
-    is_main, use_ddp,
+    base_train_ds, eval_loader, cfg, device, out_root, tracker,
+    is_main, use_ddp, rank,
     start_epoch, end_epoch, total_epochs,
-    global_step, best_total
+    global_step, best_total, pool_indices
 ):
     """Runs epochs [start_epoch, end_epoch] inclusive with original inner loop."""
     # pull frequently used cfg knobs once
@@ -161,13 +160,15 @@ def run_training_epochs(
     w_lp         = float(cfg.get("lambda_lpips", 0.4))
     log_every    = int(cfg.get("log_every", 100))
     use_amp      = bool(cfg.get("amp", True))
+    epoch_subset_size = int(cfg.get("epoch_subset_size", 5000))
+    pool_seed         = int(cfg.get("train_pool_seed", 1337))
 
     train_wall_start = time.time()
 
-    if use_ddp and train_samp is not None:
-        train_samp.set_epoch(start_epoch)
-
     for epoch in range(start_epoch, end_epoch + 1):
+        # --- build per-epoch dataloader over a fresh random subset from the fixed pool
+        epoch_indices = sample_epoch_indices(pool_indices, epoch_subset_size, seed=pool_seed, epoch=epoch)
+        train_loader, train_samp = build_epoch_subset_loader(base_train_ds, epoch_indices, cfg, use_ddp, rank)
         if use_ddp and train_samp is not None:
             train_samp.set_epoch(epoch)
 
@@ -423,6 +424,16 @@ def main():
         rank=(dist.get_rank() if use_ddp else 0),
     )
 
+    # parent DS we will slice each epoch
+    base_train_ds = train_loader.dataset
+
+    # fixed pool built once
+    train_pool_size = int(cfg.get("train_pool_size", 10000))
+    train_pool_seed = int(cfg.get("train_pool_seed", 1337))
+    pool_indices = sample_pool_indices(len(base_train_ds), train_pool_size, train_pool_seed)
+    if is_main:
+        print(f"Pool prepared: using {len(pool_indices)} images out of {len(base_train_ds)}")
+
     # --------------------- model ---------------------
     net = build_mambairv2_colorizer(
         upscale=int(cfg["model"]["upscale"]),
@@ -446,21 +457,8 @@ def main():
 
     torch.cuda.reset_peak_memory_stats() # More memory checking
 
-    # --------------------- losses/optim/sched ---------------------
-    opt = AdamW(net.parameters(), lr=float(cfg["lr"]), weight_decay=float(cfg.get("weight_decay", 0.0)))
+    # ------------------- Scaler --------------------
     scaler = GradScaler(enabled=bool(cfg.get("amp", True)))
-
-    total_steps = None
-    if cfg.get("epochs") and len(train_loader) > 0:
-        total_steps = int(cfg["epochs"]) * len(train_loader) // max(1, int(cfg.get("grad_accum", 1)))
-
-    sched = WarmupCosine(
-    opt,
-    base_lr=float(cfg["lr"]),
-    warmup_steps=int(cfg.get("warmup_steps", 500)),
-    max_steps=total_steps,
-    min_lr=float(cfg.get("min_lr", 1e-5)),
-    )
 
     # --------------------- EMA ---------------------
     ema = None
@@ -489,6 +487,8 @@ def main():
     min_lr           = float(cfg.get("min_lr", 1e-5))
     warmup_steps     = int(cfg.get("warmup_steps", 500))
 
+    rank = (dist.get_rank() if use_ddp else 0)
+
     if stage1_epochs > 0:
         # ---- Stage 1: freeze all but heads + last K blocks ----
         print(f"\n=== Stage 1: freeze all but heads + last {last_k_blocks} blocks for {stage1_epochs} epochs ===")
@@ -496,16 +496,21 @@ def main():
 
         opt = AdamW(filter(lambda p: p.requires_grad, (net.parameters() if not use_ddp else net.module.parameters())),
                     lr=stage1_lr, weight_decay=weight_decay)
-        total_steps_s1 = stage1_epochs * max(1, len(train_loader)) // max(1, int(cfg.get("grad_accum", 1)))
+        # schedule steps from per-epoch subset size instead of full dataset length
+        total_steps_s1 = (
+            stage1_epochs
+            * max(1, int(cfg.get("epoch_subset_size", 5000)))
+            // max(1, int(cfg.get("batch_size", 10)))
+        )
         sched = WarmupCosine(opt, base_lr=stage1_lr, warmup_steps=warmup_steps, max_steps=total_steps_s1, min_lr=min_lr)
 
         step, best_total = run_training_epochs(
             net=net, opt=opt, sched=sched, scaler=scaler, ema=ema,
-            train_loader=train_loader, eval_loader=eval_loader, train_samp=train_samp,
+            base_train_ds=base_train_ds, eval_loader=eval_loader,
             cfg=cfg, device=device, out_root=out_root, tracker=tracker,
-            is_main=is_main, use_ddp=use_ddp,
+            is_main=is_main, use_ddp=use_ddp, rank=rank,
             start_epoch=1, end_epoch=stage1_epochs, total_epochs=total_epochs,
-            global_step=step, best_total=best_total
+            global_step=step, best_total=best_total, pool_indices=pool_indices
         )
 
     # ---- Stage 2: unfreeze all and continue ----
@@ -514,18 +519,22 @@ def main():
         for p in (net.module if use_ddp else net).parameters():
             p.requires_grad = True
 
-        opt = AdamW((net.parameters() if not use_ddp else net.module.parameters()),
-                    lr=stage2_lr, weight_decay=weight_decay)
-        total_steps_s2 = (total_epochs - stage1_epochs) * max(1, len(train_loader)) // max(1, int(cfg.get("grad_accum", 1)))
+        opt = AdamW((net.parameters() if not use_ddp else net.module.parameters()), lr=stage2_lr, weight_decay=weight_decay)
+        
+        total_steps_s2 = (
+            (total_epochs - stage1_epochs)
+            * max(1, int(cfg.get("epoch_subset_size", 5000)))
+            // max(1, int(cfg.get("batch_size", 10)))
+        )
         sched = WarmupCosine(opt, base_lr=stage2_lr, warmup_steps=warmup_steps, max_steps=total_steps_s2, min_lr=min_lr)
 
         step, best_total = run_training_epochs(
             net=net, opt=opt, sched=sched, scaler=scaler, ema=ema,
-            train_loader=train_loader, eval_loader=eval_loader, train_samp=train_samp,
+            base_train_ds=base_train_ds, eval_loader=eval_loader,
             cfg=cfg, device=device, out_root=out_root, tracker=tracker,
-            is_main=is_main, use_ddp=use_ddp,
+            is_main=is_main, use_ddp=use_ddp, rank=rank,
             start_epoch=stage1_epochs + 1, end_epoch=total_epochs, total_epochs=total_epochs,
-            global_step=step, best_total=best_total
+            global_step=step, best_total=best_total, pool_indices=pool_indices
         )
 
     # ---- finish / teardown ----
