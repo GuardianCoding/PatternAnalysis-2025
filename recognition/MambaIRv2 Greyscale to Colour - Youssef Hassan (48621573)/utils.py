@@ -189,6 +189,7 @@ class StatTracker:
         self.uv = []
         self.tot = []
         self.lr = []
+        self.luv = []   # effective lambda_uv(t) per train step
 
         self.val_steps = []
         self.val_lp = []
@@ -212,7 +213,7 @@ class StatTracker:
             if not self.csv_path.exists():
                 with open(self.csv_path, "w", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["step", "loss_l1", "loss_lpips", "loss_uv", "loss_total", "lr", "val_l1", "val_lpips", "val_uv", "val_total"])
+                    w.writerow(["step", "loss_l1", "loss_lpips", "loss_uv", "loss_total", "lr", "lambda_uv_eff", "val_l1", "val_lpips", "val_uv", "val_total"])
 
         # Plot init (only on main)
         self._headless = matplotlib.get_backend().lower() == "agg"
@@ -256,12 +257,14 @@ class StatTracker:
             w = csv.writer(f)
             w.writerow([int(epoch), float(duration_sec), int(steps), float(steps_per_sec), float(elapsed)])
 
-    def log_train(self, step: int, loss_l1: float, loss_lp: float, loss_uv: Optional[float], total_loss: Optional[float], lr: float):
+    def log_train(self, step: int, loss_l1: float, loss_lp: float, loss_uv: Optional[float], total_loss: Optional[float], lr: float, lambda_uv_eff: Optional[float] = None):
         """Record a training step. total_loss can be None; we’ll compute loss_l1+loss_lp if so."""
         if total_loss is None:
             total_loss = float(loss_l1) + float(loss_lp)
         if loss_uv is None:
             loss_uv = 0.0
+        if lambda_uv_eff is None:
+            lambda_uv_eff = 0.0
 
         self.steps.append(int(step))
         self.l1.append(float(loss_l1))
@@ -269,6 +272,7 @@ class StatTracker:
         self.tot.append(float(total_loss))
         self.lr.append(float(lr))
         self.uv.append(float(loss_uv))
+        self.luv.append(float(lambda_uv_eff))
 
         # EMA smoothing (for display only)
         if self.smoothing > 0:
@@ -278,7 +282,7 @@ class StatTracker:
 
         # Append row to CSV
         if self.is_main:
-            self._append_csv(step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_l1=None, val_lp=None, val_uv=None, val_total=None)
+            self._append_csv(step, loss_l1, loss_lp, loss_uv, total_loss, lr, lambda_uv_eff, val_l1=None, val_lp=None, val_uv=None, val_total=None)
 
         # Redraw if needed
         if self.is_main and (step - self._last_redraw_step) >= self.redraw_every:
@@ -347,8 +351,9 @@ class StatTracker:
         (uv_line,) = self.ax_train.plot([], [], label="UV")
         (tot_line,) = self.ax_train.plot([], [], label="Total")
         (lr_line,) = self.ax_train.plot([], [], label="LR (scaled)")
+        (luv_line,) = self.ax_train.plot([], [], label="λ_uv (scaled)")
 
-        self.ax_train.set_title("Training losses / LR")
+        self.ax_train.set_title("Training losses / LR / λuv")
         self.ax_train.set_xlabel("Step")
         self.ax_train.set_ylabel("Loss")
         self.ax_train.legend(loc="upper right")
@@ -359,6 +364,7 @@ class StatTracker:
             "uv": uv_line,
             "tot": tot_line,
             "lr": lr_line,
+            "luv": luv_line,
         })
 
         # ----- Validation panel -----
@@ -401,11 +407,21 @@ class StatTracker:
         else:
             lr_scaled = []
 
+        # Scale λ_uv to roughly the same range as losses
+        if self.luv:
+            luvmax = max(self.luv)
+            luv_scale = max(1e-12, luvmax)
+            base = max(1e-6, (sum(tot) / len(tot)) if tot else 1.0)
+            luv_scaled = [v / luv_scale * base for v in self.luv]
+        else:
+            luv_scaled = []
+
         self.lines["l1"].set_data(x, l1)
         self.lines["lp"].set_data(x, lp)
         self.lines["tot"].set_data(x, tot)
         self.lines["lr"].set_data(x, lr_scaled)
         self.lines["uv"].set_data(x, uv)
+        self.lines["luv"].set_data(x, luv_scaled)
 
         xmin, xmax = min(x), max(x)
         self.ax_train.set_xlim(xmin, xmax if xmax > xmin else xmin + 1)
@@ -415,6 +431,7 @@ class StatTracker:
         y_vals += lp if lp else []
         y_vals += tot if tot else []
         y_vals += lr_scaled if lr_scaled else []
+        y_vals += luv_scaled if luv_scaled else []
         y_vals += uv if uv else []
         if y_vals:
             ymin, ymax = min(y_vals), max(y_vals)
@@ -459,7 +476,7 @@ class StatTracker:
         last_tot = y_tot[-1] if y_tot else float("nan")
         self.ax_val.set_title(f"Validation losses  |  best LPIPS={best_lp:.4f}  |  last TOTAL={last_tot:.4f}")
 
-    def _append_csv(self, step, loss_l1, loss_lp, loss_uv, total_loss, lr, val_l1, val_lp, val_uv, val_total):
+    def _append_csv(self, step, loss_l1, loss_lp, loss_uv, total_loss, lr, lambda_uv_eff, val_l1, val_lp, val_uv, val_total):
         with open(self.csv_path, "a", newline="") as f:
             w = csv.writer(f)
             w.writerow([
@@ -469,6 +486,7 @@ class StatTracker:
                 loss_uv if loss_uv is not None else "",
                 total_loss if total_loss is not None else "",
                 lr if lr is not None else "",
+                lambda_uv_eff if lambda_uv_eff is not None else "",
                 val_l1 if val_l1 is not None else "",
                 val_lp if val_lp is not None else "",
                 val_uv if val_uv is not None else "",

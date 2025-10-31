@@ -9,7 +9,7 @@ exp_defaults: mamba_results
 # ann_root:   /dataset/coco/annotations
 
 # training
-epochs: 6
+epochs: 10
 batch_size: 1            # per-GPU
 train_max_items: 2000
 train_subset_seed: 6767
@@ -20,7 +20,7 @@ grad_accum: 8            # effective 8
 
 # Hyperparameters
 lr: 2.0e-4
-min_lr: 5.0e-6
+min_lr: 1.0e-5
 weight_decay: 0.005
 ema_decay: 0.999
 warmup_steps: 1500
@@ -38,10 +38,10 @@ num_workers_val: 16
 prefetch_factor: 2
 
 # loss weights
-lambda_l1: 0.05
-lambda_lpips: 0.9
+lambda_l1: 0.15
+lambda_lpips: 0.6
 lambda_uv: 10.0            # starting weight for chroma loss
-lambda_uv_min: 0.05        # floor value at the final epoch (>= 0.0)
+lambda_uv_min: 0.6        # floor value at the final epoch (>= 0.0)
 lambda_uv_schedule: cosine # options: cosine | dynamic
 
 # aug
@@ -50,8 +50,8 @@ hflip: true
 rgb_jitter_prob: 0.3
 rgb_jitter_strength: 0.15
 uv_input_dither: true      # Adding nudges to yuv colours
-uv_dither_std: 0.01        # std of U/V noise
-lpips_side: 256            # LPIPS downsample
+uv_dither_std: 0.02        # std of U/V noise
+lpips_side: 192            # LPIPS downsample
 
 # model
 model:

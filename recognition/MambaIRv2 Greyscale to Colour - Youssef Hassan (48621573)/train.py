@@ -363,7 +363,7 @@ def main():
             if is_main and step % int(cfg.get("log_every", 100)) == 0:
                 current_lr = opt.param_groups[0]["lr"]
                 total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv).item()
-                tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, current_lr)
+                tracker.log_train(step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, lambda_uv_eff=float(lambda_uv_eff))
                 print(f"[{epoch}] step={step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
 
             # ------------- periodic sample panel (rank 0 only) -------------
