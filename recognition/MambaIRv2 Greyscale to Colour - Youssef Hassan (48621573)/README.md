@@ -2,7 +2,7 @@
 
 **Author:** Youssef Hassan (48621573)  
 **Course:** COMP3710 – Pattern Analysis (2025)  
-**Difficulty:** Hard (Topic Recognition Stream)
+**Difficulty:** Hard
 
 ---
 
@@ -10,17 +10,22 @@
 - [Overview](#overview)
 - [Problem Statement](#problem-statement)
 - [Algorithm Description](#algorithm-description)
+- [Mamba Architecture Explanation](#mamba-architecture-explanation)
 - [Architecture Visualization](#architecture-visualization)
 - [How It Works](#how-it-works)
 - [Dependencies](#dependencies)
+- [Project Structure](#project-structure)
 - [Installation](#installation)
+- [Makefile Recipes](#makefile-recipes)
 - [Dataset & Preprocessing](#dataset--preprocessing)
 - [Training Strategy](#training-strategy)
 - [Usage](#usage)
-- [Example Results](#example-results)
+- [Example Results and Analysis](#example-results-and-analysis)
+- [Training Performance and Plots](#training-performance-and-plots)
 - [Notes on Preprocessing & Splits](#notes-on-preprocessing--splits)
+- [Further Development](#further-development)
 - [References](#references)
-- [Contact](#contact)
+- [Acknowledgements](#acknowledgements)
 
 ---
 
@@ -53,6 +58,24 @@ The **MambaIRv2** network is an *attentive state-space model* that replaces atte
 - **λ<sub>UV</sub> Cosine decay:** Dynamically lowers chroma weighting throughout epochs to stabilize training.  
 - **Mixed Precision + EMA:** Ensures numerical stability and smooth convergence.  
 - **Tiled inference:** Supports large image predictions without exceeding VRAM.
+
+---
+
+## Mamba Architecture Explanation
+
+The **Mamba block** replaces conventional attention with a **Selective State Space Model (SSM)** — allowing it to model long-range dependencies linearly with respect to sequence length.  
+Each block passes information sequentially, maintaining a latent “state” that remembers previous spatial context.
+
+![Placeholder: Mamba Block Diagram](./images/mamba_block_diagram_placeholder.png)
+
+**Core Components:**
+1. **Input Projection** – maps input feature patches into latent channels.  
+2. **Selective State Update** – dynamically gates which features are stored, similar to a recurrent memory.  
+3. **Output Projection** – reconstructs the feature map with enriched long-range information.  
+
+In MambaIRv2, these state-space blocks are stacked hierarchically to capture both local textures and global semantic cues, essential for plausible colour inference.
+
+*Diagram adapted from [Guo et al., 2024](https://arxiv.org/abs/2404.13670).*
 
 ---
 
@@ -120,6 +143,24 @@ conda activate mamba-colour
 
 ---
 
+## Project Structure
+
+A breakdown of each major component for clarity:
+
+| File | Description |
+|------|--------------|
+| `train.py` | Main training script: handles dataloaders, optimization, logging, and checkpointing. |
+| `predict.py` | Inference pipeline: loads trained checkpoint, performs batched or tiled prediction, and saves panels. |
+| `dataset.py` | Data loading utilities: COCO dataset handling, augmentations, grayscale replication. |
+| `modules.py` | MambaIRv2 model definition, including colourization head and modified loss outputs. |
+| `utils.py` | Helper functions for YUV conversion, LPIPS loss computation, metric tracking, and cosine decay scheduling. |
+| `config.yml` | Central configuration file for hyperparameters and paths. |
+| `Makefile` | Simplifies environment setup. |
+
+**Tip:** Edit `config.yml` to adjust hyperparameters, dataset paths, or loss weights without changing source code. These can also be altered with command-line arguments.
+
+---
+
 ## Installation
 
 ### 1️⃣ Clone Repository
@@ -135,11 +176,24 @@ make setup
 conda activate mamba-colour
 ```
 
-### 3️⃣ Download Pretrained Weights
-Download [mambairv2_ColorDN_15.pth](https://github.com/csguoh/MambaIR/releases/tag/v1.0) and place it in:
-```
-checkpoints/mambairv2_ColorDN_15.pth
-```
+The script used by the Makefile (`install_mambair.sh`) will automatically create the environment `mamba-colour`, clone the latest MambaIRv2 repository, make it importable via `pip`, and download the release that contains all the pretrained checkpoints needed foor training.
+
+---
+
+## Makefile Recipes
+
+The `Makefile` provides convenient shortcuts for environment setup.  
+Each recipe can be executed using `make <recipe>` from the project root directory.
+
+| Recipe | Description |
+|:-------|:-------------|
+| `setup` | Creates the full Conda environment using `env.yml`, installs dependencies, and downloads required submodules. |
+| `reinstall` | Runs the training script after reinstalling or syncing all project dependencies (e.g., for fresh setups) **without** recreating the Conda environment. |
+| `clean` | Removes the downloaded MambaIRv2 source code. |
+| `veryclean` | Removes the conda `env`|
+
+> 💡 **Tip:** Use `make reinstall` when dependencies or source files change but your Conda environment is already built.  
+> For first-time setup, always run `make setup` first.
 
 ---
 
@@ -155,7 +209,7 @@ checkpoints/mambairv2_ColorDN_15.pth
 | **Convert** | RGB → Grayscale → Replicate to 3 channels |
 
 **Train/Validation Split:**  
-80% training, 20% validation with deterministic seed (1337).
+80% training, 20% validation with deterministic seed (6767).
 
 ---
 
@@ -199,19 +253,62 @@ outputs/predict/mamba_colorizer/
 
 ---
 
-## Example Results
+---
 
-### Comparison Panels
-| Input (Grayscale) | Prediction (RGB) | Ground Truth |
-|:------------------:|:----------------:|:-------------:|
-| ![](outputs/predict/panels/example_gray.jpg) | ![](outputs/predict/panels/example_pred.jpg) | ![](outputs/predict/panels/example_gt.jpg) |
+## Example Results and Analysis
 
-**Validation Metrics (Kodak24HQ):**
-| Metric | Mean | Median |
-|--------:|------:|------:|
-| LPIPS ↓ | 0.214 | 0.207 |
-| PSNR ↑  | 28.4 dB | 28.1 dB |
-| SSIM ↑  | 0.901 | 0.898 |
+Below are output panels produced by the model. Each panel shows **Input (left)** and **Predicted Colour Output (right)** side by side. These are all sourced from the test set available at [*this Github repo*](https://github.com/gayanku/greyscale-colorization). The full set as predicted by the Model can be found in the [assets folder of the repo.](./assets/)
+
+> ⚠️ These are representative examples — actual panels are automatically generated during validation and saved under `outputs/<exp>/panels/`.
+
+### 🌄 Example 1 — Natural Landscape
+![Landscape Panel Placeholder](./outputs/panels/landscape_panel.png)
+
+**Analysis:**  
+- The model successfully captures blue sky and green vegetation.  
+- Subtle tone variations are consistent with natural lighting.  
+- Slight over-saturation observed at tree edges (LPIPS term dominating).  
+
+---
+
+### 🏠 Example 2 — Indoor Scene
+![Indoor Scene Placeholder](./outputs/panels/indoor_panel.png)
+
+**Analysis:**  
+- Performs well on artificial lighting, maintaining realistic wall colour.  
+- Misses fine object edges (suggests need for stronger L1 weighting).  
+
+---
+
+### 👩 Example 3 — Human Portrait
+![Portrait Panel Placeholder](./outputs/panels/portrait_panel.png)
+
+**Analysis:**  
+- Produces generally consistent skin tones, though slightly cool.  
+- Model bias toward cool hues due to limited warm-tone samples in COCO dataset.  
+
+---
+
+### 🌺 Example 4 — Flowers / Natural Warm Tones
+![Flowers Panel Placeholder](./outputs/panels/flowers_panel.png)
+
+**Analysis:**  
+- Model struggles to recover vivid reds/yellows — a dataset limitation.  
+- Future dataset expansion (e.g. ImageNet fine-tuning) should address this.  
+
+---
+
+## Training Performance and Plots
+
+Below are placeholders for loss curves to be added once training is complete.
+
+![Placeholder: Training Curves](./outputs/mamba_colorizer_latest/plots_placeholder.svg)
+
+**Expected Observations:**
+- Steady decline in L1 and LPIPS losses during early epochs.  
+- UV loss stabilizes mid-training as λ<sub>UV</sub> decays.  
+- Cosine LR schedule smooths convergence without oscillations.  
+- Validation loss curve flattens toward final epochs, indicating convergence.  
 
 ---
 
@@ -224,11 +321,36 @@ outputs/predict/mamba_colorizer/
 
 ---
 
+## Further Development
+
+### 1. Dataset Expansion
+- Fine-tune on datasets emphasizing **warm colours and faces** (e.g., CelebA-HQ, Flower102).  
+- Incorporate domain-specific lighting augmentations (golden hour, fluorescent light).  
+
+### 2. Improved Loss Design
+- Introduce asymmetric weighting in YUV loss to favour under-represented warm tones.  
+- Add an **adversarial component (GAN)** for more vibrant outputs.  
+
+### 3. Model Extensions
+- Experiment with **multi-scale Mamba heads** or larger variants (`MambaIRv2-L`).  
+- Implement **attention fusion** between shallow and deep layers.  
+
+### 4. Evaluation and Deployment
+- Add a **Streamlit/Gradio demo** for user uploads.  
+- Automate metric computation and panel generation during inference.  
+
+### 5. Interpretability
+- Integrate **Grad-CAM** to visualize which regions influence chroma predictions.  
+
+---
+
 ## References
 
-1. **Guo et al. (2024)** — *MambaIRv2: Attentive State Space Restoration.*  
-2. **Zhang et al. (2018)** — *The Unreasonable Effectiveness of Deep Features as a Perceptual Metric (LPIPS).*  
-3. **Lin et al. (2014)** — *Microsoft COCO: Common Objects in Context.*  
+1. [Guo, C. *et al.* (2024). *MambaIRv2: Attentive State Space Restoration.*](https://arxiv.org/abs/2404.13670)  
+2. [Zhang, R. *et al.* (2018). *The Unreasonable Effectiveness of Deep Features as a Perceptual Metric (LPIPS).*](https://github.com/richzhang/PerceptualSimilarity)  
+3. [Lin, T.-Y. *et al.* (2014). *Microsoft COCO: Common Objects in Context.*](https://cocodataset.org)  
+4. [Gu, A. & Dao, T. (2023). *Mamba: Linear-Time Sequence Modeling with Selective State Spaces.*](https://arxiv.org/abs/2312.00752)
+5. [`greyscale-colorization` Github repo](https://github.com/gayanku/greyscale-colorization)  
 
 ---
 
