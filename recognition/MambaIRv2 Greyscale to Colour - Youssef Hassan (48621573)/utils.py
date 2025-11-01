@@ -119,6 +119,31 @@ def dynamic_chroma_weighting(epoch: int, total_epochs: int, base_lambda_uv: floa
     decay = max(0.4, 1.0 - 0.6 * progress)
     return float(base_lambda_uv) * float(decay)
 
+# --- Chroma-weighted UV loss and saturation prior ---
+def chroma_weighted_uv_loss(pred_rgb: torch.Tensor, gt_rgb: torch.Tensor, wmin: float = 0.5, wmax: float = 2.0) -> torch.Tensor:
+    """
+    Weight UV error by ground-truth chroma magnitude so colorful regions matter more.
+    pred_rgb, gt_rgb: [B,3,H,W] in [0,1].
+    """
+    _, u1, v1 = rgb_to_yuv(pred_rgb)
+    _, u2, v2 = rgb_to_yuv(gt_rgb)
+    chroma_gt = torch.sqrt(u2**2 + v2**2) + 1e-6
+    mean_per_img = chroma_gt.mean(dim=[1,2,3], keepdim=True).clamp_min(1e-6)
+    w = (chroma_gt / mean_per_img).clamp(wmin, wmax)
+    return ((u1 - u2).abs() + (v1 - v2).abs()).mul(w).mean()
+
+def saturation_prior(pred_rgb: torch.Tensor, gt_rgb: torch.Tensor, tau: float = 0.05) -> torch.Tensor:
+    """
+    Small penalty to discourage vanishing chroma where GT is colorful.
+    Only active where ||UV_gt|| > tau.
+    """
+    _, up, vp = rgb_to_yuv(pred_rgb)
+    _, ug, vg = rgb_to_yuv(gt_rgb)
+    chroma_pred = torch.sqrt(up**2 + vp**2)
+    chroma_gt   = torch.sqrt(ug**2 + vg**2)
+    mask = (chroma_gt > tau).float()
+    return (torch.relu(tau - chroma_pred) * mask).mean()
+
 # ----------- Image Panel Drawing Helper------------
 def save_panel_with_titles(imgs_01, titles, out_path):
     """

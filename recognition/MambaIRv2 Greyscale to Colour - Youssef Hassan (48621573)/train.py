@@ -23,7 +23,7 @@ import torch.nn.functional as F
 
 from dataset import build_coco_dataloaders, sample_pool_indices, sample_epoch_indices, build_epoch_subset_loader
 from modules import build_mambairv2_colorizer
-from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting, yuv_to_rgb
+from utils import set_seed, lpips_loss, _lpips, rgb_to_yuv, dynamic_chroma_weighting, yuv_to_rgb, chroma_weighted_uv_loss, saturation_prior
 from utils import StatTracker
 from utils import save_ckpt, load_ckpt
 from utils import save_panel_with_titles
@@ -139,6 +139,20 @@ def cosine_decay_lambda_uv(epoch: int, total_epochs: int, start: float, end: flo
     t = (epoch - 1) / float(total_epochs - 1)
     return float(end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * t)))
 
+def cosine_hold_decay_lambda_uv(epoch: int, total_epochs: int, start: float, end: float = 0.0, hold_pct: float = 0.6) -> float:
+    """
+    Hold lambda at `start` for first `hold_pct` of epochs, then cosine-decay to `end`.
+    """
+    if total_epochs <= 1:
+        return float(end)
+    hold_e = int(round(max(0.0, min(1.0, hold_pct)) * (total_epochs - 1))) + 1
+    if epoch <= hold_e:
+        return float(start)
+    t = (epoch - hold_e) / float(max(1, total_epochs - hold_e))
+    cos = 0.5 * (1 + math.cos(math.pi * min(1.0, max(0.0, t))))
+    return float(end + (start - end) * cos)
+
+# ----------------------- Epoch running script --------------------------
 def run_training_epochs(
     net: Module, opt, sched, scaler, ema,
     base_train_ds, eval_loader, cfg, device, out_root, tracker: StatTracker,
@@ -203,21 +217,25 @@ def run_training_epochs(
                 gt_s = F.interpolate(y_tgt,     size=lpips_side, mode="bilinear", align_corners=False)
                 loss_lp = lpips_loss(pr_s, gt_s)
                 
-                _, u1, v1 = rgb_to_yuv(pred_rgb)
-                _, u2, v2 = rgb_to_yuv(y_tgt)
-                loss_uv = F.l1_loss(u1, u2) + F.l1_loss(v1, v2)
+                loss_uv = chroma_weighted_uv_loss(pred_rgb, y_tgt, wmin=float(cfg.get('uv_wmin', 0.5)), wmax=float(cfg.get('uv_wmax', 2.0)))
 
-                # per-epoch UV weight uses TOTAL epochs for smooth schedule across both stages
-                if lambda_uv_sched == "cosine":
+                if lambda_uv_sched == 'cosine_hold':
+                    lambda_uv_eff = cosine_hold_decay_lambda_uv(epoch, total_epochs, lambda_uv, lambda_uv_min, hold_pct=float(cfg.get('lambda_uv_hold_pct', 0.6)))
+                elif lambda_uv_sched == 'cosine':
                     lambda_uv_eff = cosine_decay_lambda_uv(epoch, total_epochs, lambda_uv, lambda_uv_min)
                 else:
                     lambda_uv_eff = dynamic_chroma_weighting(epoch, total_epochs, lambda_uv)
 
+                loss_sat = saturation_prior(pred_rgb, y_tgt, tau=float(cfg.get('sat_tau', 0.05)))
+                lam_sat = float(cfg.get('lambda_sat', 0.05))
+
                 loss = (
                     w_l1 * loss_l1 +
                     w_lp * loss_lp +
-                    lambda_uv_eff * loss_uv
+                    lambda_uv_eff * loss_uv +
+                    lam_sat * loss_sat
                 ) / grad_accum
+
 
             scaler.scale(loss).backward()
             global_step += 1
@@ -298,11 +316,13 @@ def run_training_epochs(
                             lambda_uv_eff_v = dynamic_chroma_weighting(epoch, total_epochs, lambda_uv)
 
                         # accumulate raw components + weighted total
+                        loss_sat_v = saturation_prior(pred_v, y_v, tau=float(cfg.get('sat_tau', 0.05)))
+                        lam_sat = float(cfg.get('lambda_sat', 0.05))
                         val_l1   += l1
                         val_lp   += lp
                         val_uv   += uv
-                        val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff_v * uv)
-                        n_count  += 1
+                        val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff_v * uv) + (lam_sat * loss_sat_v)
+
 
                 # means
                 avg_l1    = val_l1 / max(n_count, 1)
@@ -325,8 +345,21 @@ def run_training_epochs(
                               opt, scaler, global_step, best_total, ema)
 
             # periodic checkpoint (rank 0 only)
-            if is_main and save_every > 0 and global_step % save_every == 0:
-                save_ckpt(out_root/f"step_{global_step}.ckpt", net.module if use_ddp else net, opt, scaler, global_step, best_total, ema)
+            best_on = str(cfg.get('best_on', 'total')).lower()
+            if (best_on == 'lpips' and avg_lp < getattr(main, 'best_lp', float('inf'))) or (best_on != 'lpips' and avg_total < best_total):
+                if best_on == 'lpips':
+                    try:
+                        main.best_lp = avg_lp
+                    except Exception:
+                        pass
+                    if is_main:
+                        save_ckpt(out_root/"best_lpips.ckpt", net.module if use_ddp else net,
+                                opt, scaler, global_step, best_total, ema)
+                else:
+                    best_total = avg_total
+                    if is_main:
+                        save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
+                                opt, scaler, global_step, best_total, ema)
 
             if global_step % 25 == 0:
                 torch.cuda.empty_cache()

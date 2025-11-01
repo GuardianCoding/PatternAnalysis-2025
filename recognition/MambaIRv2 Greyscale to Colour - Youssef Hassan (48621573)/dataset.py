@@ -9,6 +9,7 @@ from torchvision import transforms
 from torchvision.datasets.utils import download_url
 import torch.distributed as dist
 from PIL import Image
+from pathlib import Path
 
 __all__ = [
     "CocoColorisationTrain",
@@ -143,13 +144,16 @@ def _to_gray3_and_rgb(img_rgb: Image.Image):
 
 class CocoColorisationTrain(Dataset):
     def __init__(self,
-                 img_root: str,
-                 ann_file: str,
-                 crop_size: int = 256,
-                 hflip: bool = True,
-                 rgb_jitter_prob: float = 0.2,
-                 rgb_jitter_strength: float = 0.1,
-                 longside_scale_range: Tuple[float, float] = (1.00, 1.15)):
+                img_root: str,
+                ann_file: str,
+                crop_size: int = 256,
+                hflip: bool = True,
+                rgb_jitter_prob: float = 0.2,
+                rgb_jitter_strength: float = 0.1,
+                longside_scale_range: Tuple[float, float] = (1.00, 1.15),
+                chroma_bias_try: int = 0,            # how many random crops to try; pick the most colorful
+                chroma_bias_warmup_epochs: int = 0,  # enable bias only for first N epochs
+            ):
         super().__init__()
         _require_pycoco()
         self.ds = CocoDetection(root=img_root, annFile=ann_file)
@@ -158,6 +162,12 @@ class CocoColorisationTrain(Dataset):
         self.rgb_jitter_prob = float(rgb_jitter_prob)
         self._jitter_s = float(rgb_jitter_strength)
         self.scale_range = tuple(longside_scale_range)
+        self._chroma_try = int(chroma_bias_try)
+        self._chroma_warmup_epochs = int(chroma_bias_warmup_epochs)
+        self._bias_active = True
+
+    def set_bias_active(self, active: bool):
+        self._bias_active = bool(active)
 
     def __len__(self): return len(self.ds)
 
@@ -176,31 +186,47 @@ class CocoColorisationTrain(Dataset):
         t = F.adjust_saturation(t, sat)
         return F.to_pil_image(t)
 
-    def __getitem__(self, idx: int):
-        img, _ = self.ds[idx]
-        if img.mode != "RGB":
-            img = img.convert("RGB")
+    def __getitem__(self, index: int):
+        img_info = self.ds.loadImgs([self.ids[index]])[0]
+        path = Path(self.root) / img_info["file_name"]
+        img = Image.open(path).convert("RGB")
 
-        img = _random_longside_resize(img, self.crop_size, self.scale_range)
-        img = _resize_min_side(img, self.crop_size)
-
-        i, j, h, w = transforms.RandomCrop.get_params(img, output_size=(self.crop_size, self.crop_size))
-        img = F.crop(img, i, j, self.crop_size, self.crop_size)
+        # ---------- random crop with chroma bias ------------
+        best_crop = None
+        best_score = -1.0
+        tries = self._chroma_try if (self._bias_active and self._chroma_try and self._chroma_try > 1) else 1
+        for _ in range(tries):
+            i, j, h, w = transforms.RandomCrop.get_params(img, output_size=(self.crop_size, self.crop_size))
+            cand = F.crop(img, i, j, self.crop_size, self.crop_size)
+            if tries == 1:
+                best_crop = cand
+                break
+            # quick chroma score via HSV-like saturation
+            t = F.to_tensor(cand)
+            mx, mn = t.max(dim=0).values, t.min(dim=0).values
+            sat = (mx - mn).mean().item()
+            if sat > best_score:
+                best_score = sat
+                best_crop = cand
+        img = best_crop
+        # -----------------------------------------------------
 
         if self.hflip and random.random() < 0.5:
             img = F.hflip(img)
 
         if random.random() < self.rgb_jitter_prob:
-            img = self._jitter_rgb(img)
+            img = transforms.ColorJitter(
+                brightness=self.rgb_jitter_strength,
+                contrast=self.rgb_jitter_strength,
+                saturation=self.rgb_jitter_strength,
+                hue=0.02,
+                )(img)
 
-        # convert to (gray3 input, rgb target) tensors
-        x_in, y_tgt = _to_gray3_and_rgb(img)         # [3,H,W], [3,H,W]
-
-        img_id = self.ds.ids[idx]
-
-        file_name = self.ds.coco.loadImgs(img_id)[0]["file_name"]
-        
-        return x_in, y_tgt, file_name
+        img = F.to_tensor(img)
+        # grayscale input (1xHxW repeated to 3 channels)
+        img_gray = F.rgb_to_grayscale(img, num_output_channels=1)
+        img_gray = img_gray.repeat(3, 1, 1)
+        return img_gray, img
 
 
 class CocoColorisationEval(Dataset):

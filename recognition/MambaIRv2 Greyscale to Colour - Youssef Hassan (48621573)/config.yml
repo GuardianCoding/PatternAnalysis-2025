@@ -44,13 +44,22 @@ num_workers: 16
 num_workers_val: 16
 prefetch_factor: 2
 batch_size: 1
+# bias colorful crops early on
+chroma_bias_try: 2               # try 4 random crops; pick the most colorful
+chroma_bias_warmup_epochs: 9     # enable for first 9 epochs
 
 # loss weights
-lambda_l1: 0.15
-lambda_lpips: 0.6
-lambda_uv: 10.0            # starting weight for chroma loss
-lambda_uv_min: 0.6         # floor value at the final epoch (>= 0.0)
-lambda_uv_schedule: cosine # options: cosine | dynamic
+lambda_l1: 0.12
+lambda_lpips: 1.0
+lambda_uv: 6.0             # starting weight for chroma loss
+lambda_uv_min: 3.0         # floor value at the final epoch (>= 0.0)
+lambda_uv_schedule: cosine_hold # options: cosine | dynamic
+lambda_uv_hold_pct: 0.6
+lambda_sat: 0.05
+sat_tau: 0.05
+uv_wmin: 0.5
+uv_wmax: 2.0
+best_on: lpips
 
 # aug
 crop_size: 256

@@ -180,7 +180,7 @@ make setup
 conda activate mamba-colour
 ```
 
-The script used by the Makefile (`install_mambair.sh`) will automatically create the environment `mamba-colour`, clone the latest MambaIRv2 repository, make it importable via `pip`, and download the release that contains all the pretrained checkpoints needed foor training.
+The script used by the Makefile (`install_mambair.sh`) will automatically create the environment `mamba-colour`, clone the latest MambaIRv2 repository, make it importable via `pip`, and download the release that contains all the pretrained checkpoints needed for training.
 
 ---
 
@@ -215,7 +215,7 @@ Each recipe can be executed using `make <recipe>` from the project root director
 **Train/Validation Split:**  
 The split used is the default split supplied by the COCO detection dataset. 
 
-> **Warning** The COCO dataset is quite large (**~40GB**) of data.
+> **Warning:** The COCO dataset is quite large (**~40GB**) of data.
 > Ensure you have enough space, or download a smaller set manually and override the `auto_download` argument in `config.yml` and replace the dataset paths.
 
 **Randomised Sampling of the Dataset:**
@@ -262,6 +262,8 @@ outputs/predict/mamba_colorizer/
 ```
 
 ---
+
+## Training Hardware
 
 ---
 
