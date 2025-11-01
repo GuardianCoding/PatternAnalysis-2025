@@ -459,13 +459,13 @@ class StatTracker:
         x = self.steps
         if not x:
             return
-        y_l1 = self.l1
-        y_lp = self.lp
-        y_uv = self.uv
+        y_l1  = self.l1
+        y_lp  = self.lp
+        y_uv  = self.uv
         y_sat = self.sat
-        y_tot = self.total
-        y_lr = [lr * 10 for lr in self.lr]  # scaled for visibility
-        y_luv = self.lambda_uv_eff
+        y_tot = self.tot           # <-- was self.total
+        y_lr  = [lr * 10 for lr in self.lr]
+        y_luv = self.luv           # <-- was self.lambda_uv_eff
 
         # Update line data
         self.lines["l1"].set_data(x, y_l1)
@@ -476,25 +476,27 @@ class StatTracker:
         self.lines["lr"].set_data(x, y_lr)
         self.lines["luv"].set_data(x, y_luv)
 
-        # Adjust x/y limits dynamically
+        # Axis limits
         if len(x) > 1:
             xmin, xmax = min(x), max(x)
             self.ax_train.set_xlim(xmin, xmax)
+
         y_all = []
         if y_l1:  y_all += y_l1
         if y_lp:  y_all += y_lp
         if y_uv:  y_all += y_uv
         if y_sat: y_all += y_sat
         if y_tot: y_all += y_tot
-        if len(y_all) > 0:
+        if y_all:
             ymin, ymax = min(y_all), max(y_all)
             pad = (ymax - ymin) * 0.1 if ymax != ymin else 0.1
             self.ax_train.set_ylim(ymin - pad, ymax + pad)
 
-        self.ax_train.relim()
-        self.ax_train.autoscale_view()
+        self.ax_train.relim(); self.ax_train.autoscale_view()
         self.ax_train.legend(loc="upper right")
 
+        # nice title
+        xmax = x[-1]
         elapsed = time.time() - self._t0
         self.ax_train.set_title(f"Train losses / LR  |  steps={xmax}  |  {elapsed/60.0:.1f} min")
 
@@ -504,20 +506,18 @@ class StatTracker:
         if not xv:
             return
 
-        y_l1 = self.val_l1
-        y_lp = self.val_lp
-        y_uv = self.val_uv
+        y_l1  = self.val_l1
+        y_lp  = self.val_lp
+        y_uv  = self.val_uv
         y_sat = self.val_sat
-        y_tot = self.val_total
+        y_tot = self.val_tot
 
-        # Update line data
         self.lines["val_l1"].set_data(xv, y_l1)
         self.lines["val_lp"].set_data(xv, y_lp)
         self.lines["val_uv"].set_data(xv, y_uv)
         self.lines["val_sat"].set_data(xv, y_sat)
         self.lines["val_tot"].set_data(xv, y_tot)
 
-        # Adjust x/y limits dynamically
         if len(xv) > 1:
             xmin, xmax = min(xv), max(xv)
             self.ax_val.set_xlim(xmin, xmax)
@@ -528,18 +528,18 @@ class StatTracker:
         if y_uv:  y_all += y_uv
         if y_sat: y_all += y_sat
         if y_tot: y_all += y_tot
-        if len(y_all) > 0:
+        if y_all:
             ymin, ymax = min(y_all), max(y_all)
             pad = (ymax - ymin) * 0.1 if ymax != ymin else 0.1
             self.ax_val.set_ylim(ymin - pad, ymax + pad)
 
-        self.ax_val.relim()
-        self.ax_val.autoscale_view()
+        self.ax_val.relim(); self.ax_val.autoscale_view()
         self.ax_val.legend(loc="upper right")
 
-        best_lp = min(y_lp) if y_lp else float("nan")
+        best_lp  = min(y_lp) if y_lp else float("nan")
         last_tot = y_tot[-1] if y_tot else float("nan")
         self.ax_val.set_title(f"Validation losses  |  best LPIPS={best_lp:.4f}  |  last TOTAL={last_tot:.4f}")
+
 
     def _append_csv(self, step, loss_l1, loss_lp, loss_uv, loss_sat, total_loss, lr, lambda_uv_eff,
                 val_l1, val_lp, val_uv, val_sat, val_total):

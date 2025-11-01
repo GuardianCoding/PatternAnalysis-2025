@@ -85,9 +85,10 @@ def collect_images(root: str):
 
 def rgb_pil_to_gray3_tensor(rgb_pil: Image.Image) -> torch.Tensor:
     """PIL RGB -> (1,3,H,W) grayscale replicated to 3 channels, in [0,1]."""
-    gray3_pil = F.rgb_to_grayscale(rgb_pil, num_output_channels=3)
-    x = T.ToTensor()(gray3_pil).unsqueeze(0)  # (1,3,H,W)
-    return x
+    t  = T.ToTensor()(rgb_pil)                                   # [3,H,W]
+    g1 = F.rgb_to_grayscale(t, num_output_channels=1)            # [1,H,W]
+    g3 = g1.repeat(3, 1, 1).unsqueeze(0).contiguous()            # [1,3,H,W]
+    return g3
 
 def tensor01_to_uint8_img(t: torch.Tensor) -> np.ndarray:
     arr = (t.squeeze(0).permute(1,2,0).clamp(0,1).cpu().numpy() * 255.0).round().astype(np.uint8)

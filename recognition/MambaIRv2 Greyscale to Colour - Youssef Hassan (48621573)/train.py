@@ -153,7 +153,7 @@ def cosine_hold_decay_lambda_uv(epoch: int, total_epochs: int, start: float, end
     return float(end + (start - end) * cos)
 
 # ------------------------- Validation Loop ----------------------------
-def validate(net: Module, val_loader, ema,
+def validate(net: Module, val_loader, ema: EMA,
              epoch, total_epochs,
              tracker: StatTracker, global_step: int, 
              device, cfg, is_main:bool, use_ddp,
@@ -174,17 +174,19 @@ def validate(net: Module, val_loader, ema,
     uv_wmax        = float(cfg.get('uv_wmax', 2.0))
 
     with torch.no_grad():
+        # If EMA provided, swap it in once for the whole pass (faster & correct)
+        swapped = False
+        if ema is not None:
+            ema.store(net)
+            ema.copy_to(net)
+            swapped = True
+
         for batch in val_loader:
             x_v, y_v = batch if (isinstance(batch, (list, tuple)) and len(batch) >= 2) else (batch[0], batch[1])
             x_v = x_v.to(device, non_blocking=True)
             y_v = y_v.to(device, non_blocking=True)
 
-            # EMA eval if present
-            if ema is not None:
-                with ema.average_parameters():
-                    pred_v = net(x_v)
-            else:
-                pred_v = net(x_v)
+            pred_v = net(x_v)
 
             # --- component losses (match training) ---
             l1 = F.l1_loss(pred_v, y_v).item()
@@ -209,6 +211,9 @@ def validate(net: Module, val_loader, ema,
             val_total += total
             n_count  += 1
 
+        if swapped:
+            ema.restore(net)
+
     # --- averages + tracker ---
     if n_count > 0:
         avg_l1   = val_l1 / n_count
@@ -218,7 +223,7 @@ def validate(net: Module, val_loader, ema,
         avg_total = val_total / n_count
 
     tracker.log_val(global_step, loss_l1=avg_l1, loss_lp=avg_lp, loss_uv=avg_uv, loss_sat=avg_sat, loss_total=avg_total)
-    print(f"[val] step={global_step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} SAT= {val_sat:.4f} TOTAL={avg_total:.4f}")
+    print(f"[val] step={global_step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} SAT={avg_sat:.4f} TOTAL={avg_total:.4f}")
     
     if (avg_total < best_total):
         if is_main:
