@@ -222,10 +222,11 @@ def main():
         num_tokens=int(cfg["model"]["num_tokens"]),
         convffn_kernel_size=int(cfg["model"]["convffn_kernel_size"]),
         mlp_ratio=float(cfg["model"]["mlp_ratio"]),
+        pretrained=cfg.get("pretrained"),
         device=device
     ).eval()
 
-    load_ckpt(cfg.get("pretrained"), net)
+    load_ckpt(ckpt_path, net)
 
     have_gt = gt_root is not None and os.path.isdir(gt_root)
     lpips_list, psnr_list, ssim_list, names = [], [], [], []
