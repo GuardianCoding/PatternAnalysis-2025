@@ -342,7 +342,7 @@ def run_training_epochs(
                 current_lr = opt.param_groups[0]["lr"]
                 total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv + lam_sat * loss_sat).item()
                 tracker.log_train(global_step, loss_l1.item(), loss_lp.item(), loss_uv.item(), float(loss_sat.item()), total_now, current_lr, lambda_uv_eff=float(lambda_uv_eff))
-                print(f"[{epoch}] step={global_step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} lsat={loss_sat} loss_total = {total_now:.4f} lr={current_lr:.2e}")
+                print(f"[{epoch}] step={global_step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} lsat={loss_sat:.4f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
 
             # ------------- periodic sample panel (rank 0 only) -------------
             if is_main and (panel_every > 0) and (global_step % panel_every == 0):

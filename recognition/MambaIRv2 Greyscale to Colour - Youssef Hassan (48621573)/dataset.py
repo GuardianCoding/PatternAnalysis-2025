@@ -170,42 +170,55 @@ class CocoColorisationTrain(Dataset):
         return F.to_pil_image(t)
 
     def __getitem__(self, index: int):
-        img, _ = self.ds[index]
-        if img.mode != "RGB":
-            img = img.convert("RGB")
+        img_pil, _ = self.ds[index]
+        if img_pil.mode != "RGB":
+            img_pil = img_pil.convert("RGB")
 
-        # ---------- random crop with chroma bias ------------
-        best_crop = None
-        best_score = -1.0
+        # --- optional random longside scaling (data scale jitter) ---
+        if self.scale_range is not None:
+            try:
+                img_pil = _random_longside_resize(img_pil, target=self.crop_size, scale_range=self.scale_range)
+            except Exception:
+                pass  # stay robust if cfg omitted it
+
+        # --- guarantee crop feasibility: min side >= crop_size ---
+        img_pil = _resize_min_side(img_pil, self.crop_size)
+
+        # --- chroma-biased crop selection (only if enabled) ---
+        best_crop, best_score = None, -1.0
         tries = self._chroma_try if (self._bias_active and self._chroma_try and self._chroma_try > 1) else 1
         for _ in range(tries):
-            i, j, h, w = transforms.RandomCrop.get_params(img, output_size=(self.crop_size, self.crop_size))
-            cand = F.crop(img, i, j, self.crop_size, self.crop_size)
+            i, j, h, w = transforms.RandomCrop.get_params(img_pil, output_size=(self.crop_size, self.crop_size))
+            cand = F.crop(img_pil, i, j, self.crop_size, self.crop_size)
             if tries == 1:
                 best_crop = cand
                 break
-            # quick chroma score via HSV-like saturation
             t = F.to_tensor(cand)
             mx, mn = t.max(dim=0).values, t.min(dim=0).values
-            sat = (mx - mn).mean().item()
+            sat = (mx - mn).mean().item()  # simple saturation proxy
             if sat > best_score:
-                best_score = sat
-                best_crop = cand
-        img = best_crop
-        # -----------------------------------------------------
+                best_score, best_crop = sat, cand
+        img_pil = best_crop
 
+        # --- shared spatial aug ---
         if self.hflip and random.random() < 0.5:
-            img = F.hflip(img)
+            img_pil = F.hflip(img_pil)
 
+        # -------- branch: unjittered input vs jittered target --------
+        img_input_pil  = img_pil
+        img_target_pil = img_pil
         if random.random() < self.rgb_jitter_prob:
-            img = self._jitter_rgb(img)
+            img_target_pil = self._jitter_rgb(img_target_pil)
+        # --------------------------------------------------------------
 
-        img = F.to_tensor(img)
-        # grayscale input (1xHxW repeated to 3 channels)
-        img_gray = F.rgb_to_grayscale(img, num_output_channels=1)
-        img_gray = img_gray.repeat(3, 1, 1)
-        return img_gray, img
+        # --- to tensors ---
+        x_in  = F.to_tensor(img_input_pil)         # [3,H,W] (unjittered)
+        y_tgt = F.to_tensor(img_target_pil)        # [3,H,W] (jittered)
 
+        # grayscale input (replicate luminance)
+        x_gray = F.rgb_to_grayscale(x_in, num_output_channels=1).repeat(3, 1, 1)
+
+        return x_gray, y_tgt
 
 class CocoColorisationEval(Dataset):
     def __init__(self,
