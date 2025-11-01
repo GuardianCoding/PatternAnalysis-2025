@@ -1,4 +1,7 @@
-# dataset.py
+"""dataset.py — COCO2017 loaders for grayscale→RGB colorization.
+Provides train/eval datasets, COCO auto-download, and per-epoch subset sampling.
+"""
+
 import os, random, zipfile
 from typing import Tuple, Optional, Dict
 import torch
@@ -32,7 +35,7 @@ def _exists(path: str) -> bool:
     return path is not None and os.path.exists(path)
 
 def _safe_extract(zip_path: str, dst_dir: str):
-    # Simple safe extract: ensure target stays under dst_dir
+    """Safely extract a zip file ensuring all paths stay within dst_dir."""
     with zipfile.ZipFile(zip_path, 'r') as zf:
         for member in zf.infolist():
             target = os.path.abspath(os.path.join(dst_dir, member.filename))
@@ -41,10 +44,7 @@ def _safe_extract(zip_path: str, dst_dir: str):
         zf.extractall(dst_dir)
 
 def ensure_coco_2017(base_dir: str, need_train: bool = True, need_val: bool = True) -> Dict[str, str]:
-    """
-    Ensure COCO 2017 train/val images and annotations exist under base_dir.
-    Returns dict with keys: train_root, val_root, ann_root.
-    """
+    """Ensure COCO2017 assets exist (downloading if needed). Returns paths dict."""
     os.makedirs(base_dir, exist_ok=True)
     train_root = os.path.join(base_dir, "train2017")
     val_root   = os.path.join(base_dir, "val2017")
@@ -117,7 +117,7 @@ def _random_longside_resize(img: Image.Image, target: int, scale_range: Tuple[fl
 # --- RGB→RGB colorization I/O helper -----------------------------------------
 @torch.no_grad()
 def _to_gray3_and_rgb(img_rgb: Image.Image):
-    # tensor path only (functional.rgb_to_grayscale expects a Tensor)
+    """Return (gray3_tensor, rgb_tensor) from a PIL RGB image."""
     t = F.to_tensor(img_rgb)                     # [3,H,W] in [0,1]
     g1 = F.rgb_to_grayscale(t, num_output_channels=1)  # [1,H,W]
     g3 = g1.repeat(3, 1, 1).contiguous()        # [3,H,W]
@@ -126,6 +126,8 @@ def _to_gray3_and_rgb(img_rgb: Image.Image):
 # ------------------------ datasets ------------------------
 
 class CocoColorisationTrain(Dataset):
+    """COCO train set: returns (gray3_input, rgb_target) tensors in [0,1]."""
+
     def __init__(self,
                 img_root: str,
                 ann_file: str,
@@ -134,9 +136,8 @@ class CocoColorisationTrain(Dataset):
                 rgb_jitter_prob: float = 0.2,
                 rgb_jitter_strength: float = 0.1,
                 longside_scale_range: Tuple[float, float] = (1.00, 1.15),
-                chroma_bias_try: int = 0,            # how many random crops to try; pick the most colorful
-                chroma_bias_warmup_epochs: int = 0,  # enable bias only for first N epochs
-            ):
+                chroma_bias_try: int = 0,
+                chroma_bias_warmup_epochs: int = 0):
         super().__init__()
         _require_pycoco()
         self.ds = CocoDetection(root=img_root, annFile=ann_file)
@@ -155,16 +156,14 @@ class CocoColorisationTrain(Dataset):
     def __len__(self): return len(self.ds)
 
     def _jitter_rgb(self, img: Image.Image) -> Image.Image:
+        """Mild RGB jitter (brightness/contrast/saturation) on the PIL image."""
         s = self._jitter_s
         if s <= 0: return img
-        # brightness
-        b = 1.0 + random.uniform(-s, s)
+        b = 1.0 + random.uniform(-s, s)  # brightness
         img = F.adjust_brightness(img, b)
-        # contrast
-        c = 1.0 + random.uniform(-s, s)
+        c = 1.0 + random.uniform(-s, s)  # contrast
         img = F.adjust_contrast(img, c)
-        # saturation (tensor path)
-        t = F.to_tensor(img)
+        t = F.to_tensor(img)             # saturation (tensor path)
         sat = 1.0 + random.uniform(-s, s)
         t = F.adjust_saturation(t, sat)
         return F.to_pil_image(t)
@@ -174,17 +173,17 @@ class CocoColorisationTrain(Dataset):
         if img_pil.mode != "RGB":
             img_pil = img_pil.convert("RGB")
 
-        # --- optional random longside scaling (data scale jitter) ---
+        # Random longside scaling
         if self.scale_range is not None:
             try:
                 img_pil = _random_longside_resize(img_pil, target=self.crop_size, scale_range=self.scale_range)
             except Exception:
-                pass  # stay robust if cfg omitted it
+                pass
 
-        # --- guarantee crop feasibility: min side >= crop_size ---
+        # Guarantee crop feasibility: min side >= crop_size
         img_pil = _resize_min_side(img_pil, self.crop_size)
 
-        # --- chroma-biased crop selection (only if enabled) ---
+        # Chroma-biased crop selection (optional)
         best_crop, best_score = None, -1.0
         tries = self._chroma_try if (self._bias_active and self._chroma_try and self._chroma_try > 1) else 1
         for _ in range(tries):
@@ -195,36 +194,31 @@ class CocoColorisationTrain(Dataset):
                 break
             t = F.to_tensor(cand)
             mx, mn = t.max(dim=0).values, t.min(dim=0).values
-            sat = (mx - mn).mean().item()  # simple saturation proxy
+            sat = (mx - mn).mean().item()
             if sat > best_score:
                 best_score, best_crop = sat, cand
         img_pil = best_crop
 
-        # --- shared spatial aug ---
         if self.hflip and random.random() < 0.5:
             img_pil = F.hflip(img_pil)
 
-        # -------- branch: unjittered input vs jittered target --------
+        # Branch: unjittered input vs jittered target
         img_input_pil  = img_pil
         img_target_pil = img_pil
         if random.random() < self.rgb_jitter_prob:
             img_target_pil = self._jitter_rgb(img_target_pil)
-        # --------------------------------------------------------------
 
-        # --- to tensors ---
         x_in  = F.to_tensor(img_input_pil)         # [3,H,W] (unjittered)
         y_tgt = F.to_tensor(img_target_pil)        # [3,H,W] (jittered)
 
         # grayscale input (replicate luminance)
         x_gray = F.rgb_to_grayscale(x_in, num_output_channels=1).repeat(3, 1, 1)
-
         return x_gray, y_tgt
 
 class CocoColorisationEval(Dataset):
-    def __init__(self,
-                 img_root: str,
-                 ann_file: str,
-                 crop_size: int = 256):
+    """COCO val set: returns (gray3_input, rgb_target, filename)."""
+
+    def __init__(self, img_root: str, ann_file: str, crop_size: int = 256):
         super().__init__()
         _require_pycoco()
         self.ds = CocoDetection(root=img_root, annFile=ann_file)
@@ -239,13 +233,9 @@ class CocoColorisationEval(Dataset):
         img = _resize_min_side(img, self.crop_size)
         img = F.center_crop(img, [self.crop_size, self.crop_size])
 
-        # convert to (gray3 input, rgb target) tensors
         x_in, y_tgt = _to_gray3_and_rgb(img)
-
         img_id = self.ds.ids[idx]
-        
         file_name = self.ds.coco.loadImgs(img_id)[0]["file_name"]
-        
         return x_in, y_tgt, file_name
 
 # ------------------------ dataloader factory ------------------------
@@ -255,48 +245,19 @@ def _worker_init_fn(worker_id: int):
     seed = torch.initial_seed() % (2**32)
     random.seed(seed)
 
-def build_coco_dataloaders(
-    cfg: dict,
-    use_ddp: bool = False,
-    rank: int = 0,
-):
-    """
-    Build train/eval dataloaders and (optional) samplers from a config dict.
-
-    You can either supply explicit roots:
-      - train_root, val_root, ann_root
-
-    Or set:
-      - coco_root: "/where/to/keep/coco"
-      - auto_download: true
-
-    Other keys (with defaults):
-      - crop_size: 256
-      - hflip: True
-      - rgb_jitter_prob: 0.2
-      - rgb_jitter_strength: 0.1
-      - longside_scale_range: (1.0, 1.15)
-      - batch_size: 10
-      - val_batch_size: 8
-      - num_workers: 6
-      - num_workers_val: 4
-      - prefetch_factor: 4
-    """
-    # Decide whether to auto-download
+def build_coco_dataloaders(cfg: dict, use_ddp: bool = False, rank: int = 0):
+    """Build train/eval loaders (with optional auto-download and deterministic subsets)."""
     auto_dl = bool(cfg.get("auto_download", False))
     coco_root = cfg.get("coco_root", None)
 
-    # If explicit roots are missing or auto_download requested, ensure assets exist.
     roots_missing = not (cfg.get("train_root") and cfg.get("val_root") and cfg.get("ann_root"))
     if auto_dl or roots_missing:
         if coco_root is None:
-            coco_root = os.path.abspath("./datasets/coco")  # default location
+            coco_root = os.path.abspath("./datasets/coco")
         need_train = cfg.get("need_train", True)
         need_val   = cfg.get("need_val", True)
         ensured = ensure_coco_2017(coco_root, need_train=need_train, need_val=need_val)
-        train_root = ensured["train_root"]
-        val_root   = ensured["val_root"]
-        ann_root   = ensured["ann_root"]
+        train_root = ensured["train_root"]; val_root = ensured["val_root"]; ann_root = ensured["ann_root"]
     else:
         train_root = cfg.get("train_root", "./datasets/coco/train2017")
         val_root   = cfg.get("val_root",   "./datasets/coco/val2017")
@@ -317,14 +278,14 @@ def build_coco_dataloaders(
         chroma_bias_warmup_epochs=int(cfg.get("chroma_bias_warmup_epochs", 0))
     )
 
-    # ---- optional: cap training set size with a deterministic subset ----
+    # optional fixed-size training subset
     train_max_items = int(cfg.get("train_max_items", 0))
     if train_max_items > 0 and train_max_items < len(train_ds):
         seed = int(cfg.get("train_subset_seed", 1337))
         rng = random.Random(seed)
         idxs = list(range(len(train_ds)))
         rng.shuffle(idxs)
-        idxs = sorted(idxs[:train_max_items])  # stable order for nicer logs
+        idxs = sorted(idxs[:train_max_items])
         train_ds = Subset(train_ds, idxs)
 
     eval_ds = CocoColorisationEval(
@@ -333,14 +294,13 @@ def build_coco_dataloaders(
         crop_size=crop_size,
     )
 
-    # ---- optional: cap validation set size with a deterministic subset ----
     val_max_items = int(cfg.get("val_max_items", 0))
     if val_max_items > 0 and val_max_items < len(eval_ds):
         seed = int(cfg.get("val_subset_seed", 1337))
         rng = random.Random(seed)
         idxs = list(range(len(eval_ds)))
         rng.shuffle(idxs)
-        idxs = sorted(idxs[:val_max_items])  # keep stable, increasing order for nice logs
+        idxs = sorted(idxs[:val_max_items])
         eval_ds = Subset(eval_ds, idxs)
 
     train_sampler: Optional[DistributedSampler] = None
@@ -349,13 +309,13 @@ def build_coco_dataloaders(
         train_sampler = DistributedSampler(train_ds, shuffle=True, drop_last=False)
         eval_sampler  = DistributedSampler(eval_ds,  shuffle=False, drop_last=False)
 
-    nworkers_train = max(1, int(cfg.get("num_workers", 4)))
+    nworkers_train = max(1, int(cfg.get("num_workers", 6)))
     train_loader = DataLoader(
         train_ds,
         batch_size=int(cfg.get("batch_size", 10)),
         shuffle=(not use_ddp),
         sampler=train_sampler,
-        num_workers=int(cfg.get("num_workers", 6)),
+        num_workers=nworkers_train,
         pin_memory=True,
         persistent_workers=(nworkers_train > 0),
         prefetch_factor=int(cfg.get("prefetch_factor", 4)),
@@ -368,7 +328,7 @@ def build_coco_dataloaders(
         batch_size=int(cfg.get("val_batch_size", 8)),
         shuffle=False,
         sampler=eval_sampler,
-        num_workers=max(1, int(cfg.get("num_workers_val", 4))),
+        num_workers=nworkers_val,
         pin_memory=True,
         persistent_workers=(nworkers_val > 0),
         worker_init_fn=_worker_init_fn,
@@ -378,10 +338,7 @@ def build_coco_dataloaders(
 
 # ------------------------ epoch-wise subset helpers ------------------------
 def sample_pool_indices(ds_len: int, pool_size: int, seed: int) -> list[int]:
-    """
-    Deterministically pick a fixed pool of indices from a dataset of length ds_len.
-    Returns a sorted list of length <= pool_size.
-    """
+    """Pick a fixed pool (deterministic, sorted) for the whole run."""
     pool_size = max(0, min(int(pool_size), int(ds_len)))
     rng = random.Random(int(seed))
     idxs = list(range(ds_len))
@@ -389,10 +346,7 @@ def sample_pool_indices(ds_len: int, pool_size: int, seed: int) -> list[int]:
     return sorted(idxs[:pool_size])
 
 def sample_epoch_indices(pool_indices: list[int], subset_size: int, seed: int, epoch: int) -> list[int]:
-    """
-    Deterministically pick a different random subset from the fixed pool for each epoch.
-    Uses (seed + epoch) so all ranks agree, then returns a sorted list for stable logs.
-    """
+    """Pick a different subset (deterministic, sorted) per epoch from the fixed pool."""
     if not pool_indices:
         return []
     subset_size = max(0, min(int(subset_size), len(pool_indices)))
@@ -402,12 +356,8 @@ def sample_epoch_indices(pool_indices: list[int], subset_size: int, seed: int, e
     return sorted(idxs[:subset_size])
 
 def build_epoch_subset_loader(base_train_ds, epoch_indices: list[int], cfg: dict, use_ddp: bool, rank: int,):
-    """
-    Build a DataLoader over an epoch-specific Subset(base_train_ds, epoch_indices).
-    DDP-safe via DistributedSampler.
-    """
+    """Build a DataLoader over Subset(base_train_ds, epoch_indices)."""
     subset = Subset(base_train_ds, epoch_indices)
-
     train_sampler = None
     if use_ddp:
         train_sampler = DistributedSampler(
