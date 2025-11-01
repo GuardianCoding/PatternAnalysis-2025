@@ -185,6 +185,10 @@ def run_training_epochs(
         train_loader, train_samp = build_epoch_subset_loader(base_train_ds, epoch_indices, cfg, use_ddp, rank)
         if use_ddp and train_samp is not None:
             train_samp.set_epoch(epoch)
+        
+        warm = int(cfg.get('chroma_bias_warmup_epochs', 0))
+        if hasattr(train_loader.dataset, 'set_bias_active'):
+            train_loader.dataset.set_bias_active(epoch <= warm)
 
         # ---- epoch timing start ----
         epoch_start = time.time()
@@ -193,12 +197,12 @@ def run_training_epochs(
         net.train()
         opt.zero_grad(set_to_none=True)
 
-        for x_in, y_tgt, _ in train_loader:
+        for batch in train_loader:
             steps_in_epoch += 1
-
-            warm = int(cfg.get('chroma_bias_warmup_epochs', 0))
-            if hasattr(train_loader.dataset, 'set_bias_active'):
-                train_loader.dataset.set_bias_active(epoch <= warm)
+            if isinstance(batch, (list, tuple)) and len(batch) == 3:
+                x_in, y_tgt, _ = batch
+            else:
+                x_in, y_tgt = batch
 
             x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
             y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
@@ -326,6 +330,7 @@ def run_training_epochs(
                         val_lp   += lp
                         val_uv   += uv
                         val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff_v * uv) + (lam_sat * loss_sat_v)
+                        n_count += 1
 
                 # means
                 avg_l1    = val_l1 / max(n_count, 1)
