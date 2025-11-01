@@ -17,17 +17,11 @@ Examples:
     --amp
 """
 
-import warnings # Ignore warnings from lpip module
+import warnings  # Ignore warnings from lpip module
 warnings.filterwarnings("ignore", message=".*pretrained.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*Arguments other than a weight enum.*deprecated.*")
-warnings.filterwarnings(
-    "ignore",
-    message="torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument."
-)
-warnings.filterwarnings(
-    "ignore",
-    message="Applied workaround for CuDNN issue, install nvrtc.so"
-)
+warnings.filterwarnings("ignore", message="torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument.")
+warnings.filterwarnings("ignore", message="Applied workaround for CuDNN issue, install nvrtc.so")
 
 import os
 import argparse
@@ -36,16 +30,16 @@ from pathlib import Path
 from datetime import datetime
 import yaml
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
-
+from PIL import Image
 import torch
 import torchvision.transforms as T
 from torchvision.transforms import functional as F
-from torchvision.utils import save_image, make_grid
+from torchvision.utils import save_image
 from skimage.metrics import structural_similarity as ssim_metric
 import pandas as pd
 from torch.cuda.amp import autocast
 from contextlib import nullcontext
+import math
 
 from modules import build_mambairv2_colorizer
 from utils import lpips_loss, psnr as psnr_fn, save_panel_with_titles, load_ckpt
@@ -53,11 +47,12 @@ from utils import lpips_loss, psnr as psnr_fn, save_panel_with_titles, load_ckpt
 # ------------------ helpers ------------------
 
 def load_config(path: str) -> dict:
+    """Load YAML config as dict."""
     cfg = yaml.safe_load(open(path, "r"))
     return cfg
 
 def merge_cfg_cli(cfg: dict, args) -> dict:
-    # allow CLI to override
+    """Override pieces of config via CLI flags for ad-hoc runs."""
     if args.test_root is not None:
         cfg.setdefault("predict", {})
         cfg["predict"]["test_root"] = args.test_root
@@ -65,7 +60,7 @@ def merge_cfg_cli(cfg: dict, args) -> dict:
         cfg.setdefault("predict", {})
         cfg["predict"]["gt_root"] = args.gt_root
     if args.ckpt is not None:
-        cfg["resume"] = args.ckpt  # reuse same key as training "resume"/or pass explicitly below
+        cfg["resume"] = args.ckpt
     if args.embed_dim is not None:
         cfg.setdefault("model", {})
         cfg["model"]["embed_dim"] = args.embed_dim
@@ -77,6 +72,7 @@ def merge_cfg_cli(cfg: dict, args) -> dict:
     return cfg
 
 def collect_images(root: str):
+    """Recursively gather image files under root."""
     exts = ("*.png","*.jpg","*.jpeg","*.bmp","*.PNG","*.JPG","*.JPEG","*.BMP")
     files = []
     for e in exts:
@@ -91,15 +87,18 @@ def rgb_pil_to_gray3_tensor(rgb_pil: Image.Image) -> torch.Tensor:
     return g3
 
 def tensor01_to_uint8_img(t: torch.Tensor) -> np.ndarray:
+    """[0,1] BCHW tensor -> uint8 HWC image."""
     arr = (t.squeeze(0).permute(1,2,0).clamp(0,1).cpu().numpy() * 255.0).round().astype(np.uint8)
     return arr
 
 def ssim_on_tensors(a01: torch.Tensor, b01: torch.Tensor) -> float:
+    """Compute SSIM on [0,1] tensors by routing through uint8 arrays."""
     a = tensor01_to_uint8_img(a01)
     b = tensor01_to_uint8_img(b01)
     return float(ssim_metric(a, b, channel_axis=2, data_range=255))
 
 def maybe_downscale_pil(img: Image.Image, max_side=0, max_pixels=0) -> Image.Image:
+    """Downscale a PIL image by max_side or max_pixels constraints."""
     W, H = img.size
     if max_pixels and H*W > max_pixels:
         s = (max_pixels / (H*W))**0.5
@@ -111,20 +110,19 @@ def maybe_downscale_pil(img: Image.Image, max_side=0, max_pixels=0) -> Image.Ima
         img = img.resize((W, H), Image.BICUBIC)
     return img
 
-import math
-
 def pad_to_multiple(x: torch.Tensor, multiple: int) -> tuple[torch.Tensor, tuple[int,int]]:
+    """Reflect-pad an image tensor so H,W are multiples of `multiple`."""
     _,_,H,W = x.shape
     Hn = math.ceil(H / multiple) * multiple
     Wn = math.ceil(W / multiple) * multiple
-    if (Hn, Wn) == (H, W): 
+    if (Hn, Wn) == (H, W):
         return x, (0,0)
     xpad = torch.nn.functional.pad(x, (0, Wn-W, 0, Hn-H), mode="reflect")
     return xpad, (Hn-H, Wn-W)
 
 @torch.no_grad()
 def forward_tiled(net, x01, tile=512, overlap=32, pad_mult=8):
-    # Optionally pad to model/window multiple to avoid boundary artifacts
+    """Tiled forward pass with reflect padding and overlap blending."""
     x_pad, (ph, pw) = pad_to_multiple(x01, pad_mult)
     _, C, H, W = x_pad.shape
     out = torch.zeros_like(x_pad)
@@ -133,15 +131,13 @@ def forward_tiled(net, x01, tile=512, overlap=32, pad_mult=8):
     step = tile - overlap
     for y in range(0, H, step):
         for x in range(0, W, step):
-            y0 = y
-            x0 = x
+            y0 = y; x0 = x
             y1 = min(y0 + tile, H)
             x1 = min(x0 + tile, W)
-            # grow box to include overlap but clip to image
             y0i = max(0, y1 - tile)
             x0i = max(0, x1 - tile)
             patch = x_pad[:, :, y0i:y1, x0i:x1]
-            pred  = net(patch).clamp(0,1)
+            pred  = net(patch).clamp(0, 1)
             out[:, :, y0i:y1, x0i:x1] += pred
             norm[:, :, y0i:y1, x0i:x1] += 1.0
 
@@ -180,7 +176,6 @@ def main():
 
     if test_root is None:
         raise RuntimeError("No test_root provided. Add predict.test_root to config.yml or pass --test_root.")
-
     if ckpt_path is None:
         raise RuntimeError("No checkpoint provided. Pass --ckpt or set 'resume' in config.yml to your trained .ckpt.")
 
@@ -241,19 +236,17 @@ def main():
             rgb_pil = maybe_downscale_pil(rgb_pil, max_side=args.max_side, max_pixels=args.max_pixels)
 
             x_in = rgb_pil_to_gray3_tensor(rgb_pil).to(device)  # (1,3,H,W)
-            
-            # Inference (tiled if requested)
+
+            # Run inference, optionally tiled
             if args.tile and args.tile > 0:
                 pred_rgb = forward_tiled(
                     net, x_in, tile=args.tile, overlap=args.overlap,
                     pad_mult=int(cfg["model"].get("window_size", 8))
-            )
+                )
             else:
                 pred_rgb = net(x_in)
 
-            pred_rgb = pred_rgb.clamp(0, 1)   # ensures [0,1] smoothly
-
-            # Save colorized image
+            pred_rgb = pred_rgb.clamp(0, 1)
             save_image(pred_rgb, color_dir / name)
 
             # Build panel
@@ -287,21 +280,16 @@ def main():
             else:
                 print(f"[{i:04d}/{len(files)}] {name}  saved")
 
-            
             if not args.no_panels:
-                imgs_cpu = [t.cpu() for t in imgs]  # ensure CPU
+                imgs_cpu = [t.cpu() for t in imgs]
                 save_panel_with_titles(imgs_cpu, titles, panel_dir / name)
 
             torch.cuda.empty_cache()
 
     # Write metrics summary if any
     if len(lpips_list) > 0:
-        df = pd.DataFrame({
-            "name": names,
-            "LPIPS": lpips_list,
-            "PSNR": psnr_list,
-            "SSIM": ssim_list
-        }).sort_values("name")
+        import pandas as pd
+        df = pd.DataFrame({"name": names, "LPIPS": lpips_list, "PSNR": psnr_list, "SSIM": ssim_list}).sort_values("name")
         csv_path = run_dir / "metrics.csv"
         df.to_csv(csv_path, index=False)
 
