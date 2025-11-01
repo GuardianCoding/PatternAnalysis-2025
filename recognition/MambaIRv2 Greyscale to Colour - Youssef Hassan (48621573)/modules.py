@@ -1,20 +1,6 @@
-# modules.py
-# Builds an official MambaIRv2 model compatible with the released
-# "mambairv2_ColorDN_15.pth" checkpoint, then adapts it to 1-in/2-out for L->ab.
-#
-# Usage (training):
-#   from modules import build_mambairv2_colorizer
-#   net = build_mambairv2_colorizer(pretrained="checkpoints/mambairv2_ColorDN_15.pth")
-#
-# Notes:
-# - We construct the SAME arch class used by the repo for ColorDN (MambaIRv2),
-#   then replace only the first/last convs to 1-in / 2-out after loading weights.
-# - Checkpoint formats vary ("state_dict", "params", "network_g"). We handle all.
-#
-# Refs (repo + weights list and compatibility statements):
-# - Repo & arch files: basicsr/archs/mambairv2_arch.py in csguoh/MambaIR. :contentReference[oaicite:0]{index=0}
-# - The README notes MambaIRv2 is compatible with previous MambaIR/backbone releases
-#   and hosts pretrained weights on HF. :contentReference[oaicite:1]{index=1}
+"""modules.py — Model factory for MambaIRv2 colorization (RGB→RGB).
+Builds the official MambaIRv2 arch and optionally loads a compatible checkpoint.
+"""
 
 from __future__ import annotations
 from typing import Tuple, Optional
@@ -23,9 +9,8 @@ import torch
 import torch.nn as nn
 
 # Try to import the official class from the repo install.
-# If you installed the repo with `pip install -e external/MambaIR`, this should work.
 try:
-    from basicsr.archs.mambairv2_arch import MambaIRv2  # constructor lives here in the repo
+    from basicsr.archs.mambairv2_arch import MambaIRv2  # constructor in the repo
     _HAVE_MAMBAIR = True
 except Exception as e:
     MambaIRv2 = None
@@ -51,10 +36,7 @@ def build_mambairv2_colorizer(
     pretrained: Optional[str] = None,
     device: Optional[torch.device] = None
 ) -> nn.Module:
-    """
-    Build the standard RGB→RGB MambaIRv2 model (3 input / 3 output)
-    for color restoration or gray→color finetuning with full checkpoint reuse.
-    """
+    """Build standard RGB→RGB MambaIRv2 (finetune for gray→color without surgery)."""
     if not _HAVE_MAMBAIR:
         raise ImportError(
             "Could not import MambaIRv2 from basicsr.archs.mambairv2_arch. "
@@ -79,14 +61,15 @@ def build_mambairv2_colorizer(
         use_checkpoint=True,
     )
 
+    # Optional checkpoint: handle common container keys and load loosely
     if pretrained:
-        sd = torch.load(pretrained, map_location='cpu')
-    if isinstance(sd, dict):
-        for k in ("state_dict","params","network_g","model"):
-            if k in sd and isinstance(sd[k], dict):
-                sd = sd[k]; break
-    missing, unexpected = net.load_state_dict(sd, strict=True)
-    print(f"[pretrained] loaded strict=True  missing={len(missing)}  unexpected={len(unexpected)}")
+        sd = torch.load(pretrained, map_location="cpu")
+        if isinstance(sd, dict):
+            for k in ("state_dict", "params", "network_g", "model"):
+                if k in sd and isinstance(sd[k], dict):
+                    sd = sd[k]; break
+        missing, unexpected = net.load_state_dict(sd, strict=False)
+        print(f"[pretrained] strict=False  missing={len(missing)}  unexpected={len(unexpected)}")
 
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -95,10 +78,9 @@ def build_mambairv2_colorizer(
 
 # --------- quick self-test (optional) ---------
 if __name__ == "__main__":
-    # Smoke test: build the model without a checkpoint and run a dummy forward.
     try:
         model = build_mambairv2_colorizer(pretrained=None, device=torch.device('cpu'))
-        x = torch.randn(1, 1, 64, 64)
+        x = torch.randn(1, 3, 64, 64)
         y = model(x)
         print("OK:", y.shape)
     except Exception as e:
