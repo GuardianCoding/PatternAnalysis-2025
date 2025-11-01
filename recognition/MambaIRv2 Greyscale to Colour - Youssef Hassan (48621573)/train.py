@@ -227,7 +227,7 @@ def validate(net: Module, val_loader, ema: EMA,
     
     if (avg_total < best_total):
         if is_main:
-            save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
+            save_ckpt(out_root/"checkpoints"/"best_total.ckpt", net.module if use_ddp else net,
                     opt, scaler, global_step, avg_total, ema)
 
 # ----------------------- Epoch running script --------------------------
@@ -376,7 +376,7 @@ def run_training_epochs(
 
             # periodic checkpoint (rank 0 only)
             if is_main and save_every > 0 and global_step % save_every == 0:
-                save_ckpt(out_root/f"step_{global_step}.ckpt", net.module if use_ddp else net, opt, scaler, global_step, best_total, ema)
+                save_ckpt(out_root/"checkpoints"/f"step_{global_step}.ckpt", net.module if use_ddp else net, opt, scaler, global_step, best_total, ema)
 
             if global_step % 25 == 0:
                 torch.cuda.empty_cache()
@@ -431,11 +431,13 @@ def main():
     ts = time.strftime("%Y%m%d-%H%M%S")  # e.g. 20251022-2038
     run_name = f"{exp_name}_{ts}"
     out_root: Path = exp_base / run_name
+    ckpt_dir: Path = out_root / "checkpoints"
 
 
     is_main = (not use_ddp) or dist.get_rank() == 0
     if is_main:
         out_root.mkdir(parents=True, exist_ok=True)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
         # save merged config for reproducibility
         yaml.safe_dump(cfg, open(out_root / "config_merged.yaml", "w"))
         # write a small run meta file

@@ -50,14 +50,23 @@ Challenges addressed:
 
 ## Algorithm Description
 
-The **MambaIRv2** network is an *attentive state-space model* that replaces attention with selective SSM layers to achieve linear-time complexity and long-range spatial awareness.
+The **MambaIRv2** backbone is an *Attentive State Space Model (SSM)* that models long-range image dependencies with linear time complexity, replacing attention with selective SSM layers.
 
 ### Adaptations for Colourization
-- **Input/Output mapping:** Replicates grayscale input across 3 channels (Y³) → RGB output.  
-- **Loss formulation:** Combines *Charbonnier L1*, *LPIPS perceptual loss*, and *YUV chroma loss*.  
-- **λ<sub>UV</sub> Cosine decay:** Dynamically lowers chroma weighting throughout epochs to stabilize training.  
-- **Mixed Precision + EMA:** Ensures numerical stability and smooth convergence.  
-- **Tiled inference:** Supports large image predictions without exceeding VRAM.
+- **Input format:** Replicates grayscale luminance to 3 channels (`gray3`) for compatibility with pretrained RGB weights.  
+- **Output:** Full RGB prediction.  
+- **Loss function:**  
+  \[
+  \text{Total Loss} = \lambda_{L1} L1 + \lambda_{LPIPS} LPIPS + \lambda_{UV}(t) L_{UV} + \lambda_{SAT} L_{SAT}
+  \]
+  - *L1*: Charbonnier loss for reconstruction stability.  
+  - *LPIPS*: Perceptual similarity.  
+  - *UV*: Chroma-weighted error (weighted by ground-truth colourfulness).  
+  - *SAT*: Saturation prior to discourage dull colours.  
+- **Dynamic λ<sub>UV</sub>:** Uses cosine decay (with optional “hold” schedule) to reduce chroma weighting later in training.  
+- **Chroma jitter:** Adds small UV noise during training to encourage richer colours.  
+- **AMP + EMA:** Mixed precision with exponential moving average for stable convergence.  
+- **Tiled inference:** Efficient prediction on large images using overlapping patches.
 
 ---
 
@@ -186,18 +195,16 @@ The script used by the Makefile (`install_mambair.sh`) will automatically create
 
 ## Makefile Recipes
 
-The `Makefile` provides convenient shortcuts for environment setup.  
-Each recipe can be executed using `make <recipe>` from the project root directory.
+The `Makefile` simplifies setup and maintenance.
 
 | Recipe | Description |
 |:-------|:-------------|
-| `setup` | Creates the full Conda environment using `env.yml`, installs dependencies, and downloads required submodules. |
-| `reinstall` | Runs the training script after reinstalling or syncing all project dependencies (e.g., for fresh setups) **without** recreating the Conda environment. |
-| `clean` | Removes the downloaded MambaIRv2 source code. |
-| `veryclean` | Removes the conda `env`|
+| `make setup` | Creates the Conda environment and installs dependencies via `env.yml`. |
+| `make reinstall` | Reinstalls dependencies without recreating the environment. |
+| `make clean` | Removes downloaded MambaIRv2 source code. |
+| `make veryclean` | Deletes the Conda environment. |
 
-> 💡 **Tip:** Use `make reinstall` when dependencies or source files change but your Conda environment is already built.  
-> For first-time setup, always run `make setup` first.
+Use `make setup` for first-time setup, or `make reinstall` after editing dependencies.
 
 ---
 
@@ -206,11 +213,18 @@ Each recipe can be executed using `make <recipe>` from the project root director
 | Step | Description |
 |------|--------------|
 | **Dataset** | COCO 2017 (`train2017`, `val2017`) |
-| **Resize** | Random scale factor between 1.0–1.15× |
-| **Crop** | Random 256×256 crop |
+| **Auto-download** | Automatically downloads COCO using `pycocotools` and safe extraction. |
+| **Resize** | Random long-side resize (1.0–1.15×) |
+| **Crop** | Random 256×256 crop (colour-biased selection for early epochs) |
 | **Flip** | 50% horizontal flip |
-| **Augment** | Brightness/contrast jitter |
-| **Convert** | RGB → Grayscale → Replicate to 3 channels |
+| **Augment** | Brightness, contrast, and saturation jitter (probability set in config) |
+| **Convert** | RGB → grayscale → replicated to 3 channels (`gray3`) |
+
+**Chroma Bias:**  
+During early epochs, multiple random crops are sampled and the most colourful patch is chosen (`chroma_bias_try`). This gradually disables after warmup.
+
+**Subset Sampling:**  
+Each epoch draws a deterministic subset of the dataset from a fixed random pool (`train_pool_size`, `epoch_subset_size`), ensuring diversity and reproducibility.
 
 **Train/Validation Split:**  
 The split used is the default split supplied by the COCO detection dataset. 
@@ -218,38 +232,46 @@ The split used is the default split supplied by the COCO detection dataset.
 > **Warning:** The COCO dataset is quite large (**~40GB**) of data.
 > Ensure you have enough space, or download a smaller set manually and override the `auto_download` argument in `config.yml` and replace the dataset paths.
 
-**Randomised Sampling of the Dataset:**
-The script takes a pool from the dataset and samples different images from that pool for each epoch to ensure data variety. The knobs for controlling the sizes of these sets can be found in `config.yml`.
-
 ---
 
 ## Training Strategy
 
-Two-stage fine-tuning process for stable adaptation:
+The training uses a **two-stage fine-tuning** pipeline for controlled adaptation from RGB→RGB weights to grayscale→RGB.
 
 | Stage | Description | LR | Loss |
 |--------|--------------|------|------|
-| Stage 1 | Freeze backbone, train final blocks. The objective of this is to incentivise the model to learn to take greyscale inputs and output colour without overwriting the pretrained model weights too early. | 3e-4 | L1 only |
-| Stage 2 | Unfreeze all layers and train the model. This allows the entire model to be utilised to increase the quality of the colour results produced after the model has already learning the expected structure in Stage 1. | 5e-5 | L1 + LPIPS + UV |
+| **Stage 1** | Freezes all but the final K blocks and heads to preserve pretrained structure. Teaches model to map grayscale inputs to colour before full fine-tuning. | 3e-4 | Charbonnier (L1) only |
+| **Stage 2** | Unfreezes all layers for end-to-end fine-tuning. | 5e-5 | L1 + LPIPS + UV + SAT (cosine-decayed λ<sub>UV</sub>) |
 
-**Training Example:**
-```bash
-python train.py --config configs/config.yml   --pretrained checkpoints/mambairv2_ColorDN_15.pth   --exp_name mamba_colorizer
-```
-
-**Outputs:**
-- `outputs/<exp>/plots.svg`  
-- `outputs/<exp>/logs/train_log.csv`  
-- `outputs/<exp>/panels/`  
-- `outputs/<exp>/checkpoints/*.ckpt`  
+**Additional details:**
+- **Grad Accumulation:** Configurable for larger virtual batches.  
+- **WarmupCosine Scheduler:** Linear warmup then cosine decay.  
+- **EMA Tracking:** Maintains a moving average of weights.  
+- **Validation:** Every few steps using the same loss formulation.  
+- **Panel Generation:** Saves comparison grids during training for qualitative monitoring.
 
 ---
 
 ## Usage
 
+### Training
+```bash
+python train.py --config config.yml --pretrained checkpoints/mambairv2_ColorDN_15.pth
+```
+
+**Outputs are saved under:**
+```
+outputs/<exp_name>/
+├── checkpoints/
+├── logs/
+├── panels/
+├── plots.svg
+└── config_merged.yaml
+```
+
 **Inference Command:**
 ```bash
-python predict.py --config configs/config.yml   --ckpt outputs/mamba_colorizer_best.ckpt   --test_root ./datasets/test_images   --tile 512 --overlap 32 --amp
+python predict.py --config config.yml   --ckpt outputs/<exp>/mamba_colorizer_best.ckpt   --test_root ./datasets/test_images   --tile 512 --overlap 32 --amp
 ```
 
 **Output Directory:**
