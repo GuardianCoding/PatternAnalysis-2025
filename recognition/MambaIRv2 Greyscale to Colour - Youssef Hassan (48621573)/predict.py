@@ -1,58 +1,112 @@
 #!/usr/bin/env python3
-"""
-predict.py — inference for grayscale→color using a trained MambaIRv2 model.
+"""predict.py — Inference for grayscale→color using a trained MambaIRv2 model.
 
-Reads settings from your existing config.yml (same file used for training).
-You can override test/ckpt paths via CLI flags if you want.
+Overview
+--------
+This script colorizes images by:
+  1) Reading your training `config.yml` (same file used during training).
+  2) Optionally applying CLI overrides for paths and model dims.
+  3) Building the MambaIRv2 model shell → loading the trained checkpoint (.ckpt).
+  4) Converting each input to 3-channel grayscale (replicated luminance).
+  5) Running the model (optionally tiled) and saving colorized outputs.
+  6) Optionally computing LPIPS/PSNR/SSIM if a GT folder is provided.
 
-Examples:
+Outputs
+-------
+Creates a timestamped folder: `out_dir/predict/<exp_name>/<YYYYmmdd_HHMMSS>/`
+  • color/  : per-image colorized outputs (PNG/JPG preserved by filename)
+  • panels/ : side-by-side composites (Gray | Pred | [GT when provided])
+  • config_merged.yaml : provenance (config after CLI overrides)
+  • metrics.csv        : optional (when GT provided)
+
+Tiled Inference
+---------------
+For large images, use `--tile S --overlap O` to process images in overlapping
+windows and blend predictions. This trades a small seam error for reduced VRAM.
+
+Examples
+--------
   # Basic inference (inputs may be gray or RGB)
-  python predict.py --config config.yml --ckpt outputs/mamba_color_lab/best_lpips.ckpt
+  python predict.py --config config.yml --ckpt outputs/run/best_total.ckpt
 
-  # Override test root (if not already in config.yml) and provide GT for metrics
+  # Override test root and provide GT for metrics
   python predict.py --config config.yml \
-    --test_root datasets/ColorDN/Kodak24HQ \
-    --gt_root   datasets/ColorDN/Kodak24HQ \
-    --ckpt      outputs/mamba_color_lab/best_lpips.ckpt \
+    --test_root datasets/Kodak24 \
+    --gt_root   datasets/Kodak24 \
+    --ckpt      outputs/run/best_total.ckpt \
     --amp
 """
 
-import warnings  # Ignore warnings from lpip module
+from __future__ import annotations
+
+import warnings  # Keep logs clean from noisy deps
 warnings.filterwarnings("ignore", message=".*pretrained.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*Arguments other than a weight enum.*deprecated.*")
 warnings.filterwarnings("ignore", message="torch.meshgrid: in an upcoming release, it will be required to pass the indexing argument.")
 warnings.filterwarnings("ignore", message="Applied workaround for CuDNN issue, install nvrtc.so")
 
 import os
+import math
 import argparse
 from glob import glob
 from pathlib import Path
 from datetime import datetime
+from contextlib import nullcontext
+
 import yaml
 import numpy as np
+import pandas as pd
 from PIL import Image
+
 import torch
 import torchvision.transforms as T
-from torchvision.transforms import functional as F
+import torchvision.transforms.functional as F
 from torchvision.utils import save_image
-from skimage.metrics import structural_similarity as ssim_metric
-import pandas as pd
 from torch.cuda.amp import autocast
-from contextlib import nullcontext
-import math
+from skimage.metrics import structural_similarity as ssim_metric
 
 from modules import build_mambairv2_colorizer
 from utils import lpips_loss, psnr as psnr_fn, save_panel_with_titles, load_ckpt
 
-# ------------------ helpers ------------------
+
+# =============================================================================
+# Small helpers
+# =============================================================================
 
 def load_config(path: str) -> dict:
-    """Load YAML config as dict."""
-    cfg = yaml.safe_load(open(path, "r"))
-    return cfg
+    """Load YAML config from disk.
+
+    Parameters
+    ----------
+    path : str
+        Path to a `config.yml`.
+
+    Returns
+    -------
+    dict
+        Parsed configuration dictionary.
+    """
+    return yaml.safe_load(open(path, "r"))
+
 
 def merge_cfg_cli(cfg: dict, args) -> dict:
-    """Override pieces of config via CLI flags for ad-hoc runs."""
+    """Override pieces of the config with CLI flags for ad-hoc runs.
+
+    This function keeps the original config as the source of truth and only
+    *inserts/overrides* keys that the user opts to change via the CLI.
+
+    CLI Overrides
+    -------------
+    --test_root / --gt_root : put under `cfg['predict']`.
+    --ckpt                 : placed under `cfg['resume']` for uniformity.
+    --embed_dim / --depths : allow quick structural overrides for experimentation.
+    --amp                  : enable mixed precision (CUDA only).
+
+    Returns
+    -------
+    dict
+        The merged configuration (mutated copy).
+    """
     if args.test_root is not None:
         cfg.setdefault("predict", {})
         cfg["predict"]["test_root"] = args.test_root
@@ -71,92 +125,137 @@ def merge_cfg_cli(cfg: dict, args) -> dict:
         cfg["amp"] = True
     return cfg
 
-def collect_images(root: str):
-    """Recursively gather image files under root."""
-    exts = ("*.png","*.jpg","*.jpeg","*.bmp","*.PNG","*.JPG","*.JPEG","*.BMP")
-    files = []
+
+def collect_images(root: str) -> list[str]:
+    """Recursively gather image file paths under `root` (common extensions only)."""
+    exts = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.PNG", "*.JPG", "*.JPEG", "*.BMP")
+    files: list[str] = []
     for e in exts:
         files += glob(os.path.join(root, "**", e), recursive=True)
     return sorted(files)
 
+
 def rgb_pil_to_gray3_tensor(rgb_pil: Image.Image) -> torch.Tensor:
-    """PIL RGB -> (1,3,H,W) grayscale replicated to 3 channels, in [0,1]."""
+    """PIL RGB → (1,3,H,W) grayscale replicated to 3 channels, values in [0,1]."""
     t  = T.ToTensor()(rgb_pil)                                   # [3,H,W]
     g1 = F.rgb_to_grayscale(t, num_output_channels=1)            # [1,H,W]
     g3 = g1.repeat(3, 1, 1).unsqueeze(0).contiguous()            # [1,3,H,W]
     return g3
 
+
 def tensor01_to_uint8_img(t: torch.Tensor) -> np.ndarray:
-    """[0,1] BCHW tensor -> uint8 HWC image."""
-    arr = (t.squeeze(0).permute(1,2,0).clamp(0,1).cpu().numpy() * 255.0).round().astype(np.uint8)
+    """Convert a [0,1] BCHW tensor to a uint8 HWC image for metric libs."""
+    arr = (t.squeeze(0).permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255.0).round().astype(np.uint8)
     return arr
 
+
 def ssim_on_tensors(a01: torch.Tensor, b01: torch.Tensor) -> float:
-    """Compute SSIM on [0,1] tensors by routing through uint8 arrays."""
+    """Compute SSIM on [0,1] tensors via uint8 arrays (skimage expects uint8)."""
     a = tensor01_to_uint8_img(a01)
     b = tensor01_to_uint8_img(b01)
     return float(ssim_metric(a, b, channel_axis=2, data_range=255))
 
-def maybe_downscale_pil(img: Image.Image, max_side=0, max_pixels=0) -> Image.Image:
-    """Downscale a PIL image by max_side or max_pixels constraints."""
+
+def maybe_downscale_pil(img: Image.Image, max_side: int = 0, max_pixels: int = 0) -> Image.Image:
+    """Optionally downscale a PIL image by max_side or max_pixels constraints.
+
+    • If `max_pixels>0`, the image is resized so H*W ≤ max_pixels (preserving aspect).
+    • If `max_side>0`, the image is resized so max(H,W) ≤ max_side.
+
+    This is useful to keep inference practical on huge inputs.
+
+    Returns
+    -------
+    Image.Image
+        Possibly resized image (original otherwise).
+    """
     W, H = img.size
-    if max_pixels and H*W > max_pixels:
-        s = (max_pixels / (H*W))**0.5
-        W, H = max(1, int(W*s)), max(1, int(H*s))
+    if max_pixels and H * W > max_pixels:
+        s = (max_pixels / (H * W)) ** 0.5
+        W, H = max(1, int(W * s)), max(1, int(H * s))
         img = img.resize((W, H), Image.BICUBIC)
     if max_side and max(H, W) > max_side:
         s = max_side / max(H, W)
-        W, H = max(1, int(W*s)), max(1, int(H*s))
+        W, H = max(1, int(W * s)), max(1, int(H * s))
         img = img.resize((W, H), Image.BICUBIC)
     return img
 
-def pad_to_multiple(x: torch.Tensor, multiple: int) -> tuple[torch.Tensor, tuple[int,int]]:
-    """Reflect-pad an image tensor so H,W are multiples of `multiple`."""
-    _,_,H,W = x.shape
+
+def pad_to_multiple(x: torch.Tensor, multiple: int) -> tuple[torch.Tensor, tuple[int, int]]:
+    """Reflect-pad image tensor so H and W are multiples of `multiple`.
+
+    Returns the padded tensor and the (pad_H, pad_W) added so callers can unpad.
+    """
+    _, _, H, W = x.shape
     Hn = math.ceil(H / multiple) * multiple
     Wn = math.ceil(W / multiple) * multiple
     if (Hn, Wn) == (H, W):
-        return x, (0,0)
-    xpad = torch.nn.functional.pad(x, (0, Wn-W, 0, Hn-H), mode="reflect")
-    return xpad, (Hn-H, Wn-W)
+        return x, (0, 0)
+    xpad = torch.nn.functional.pad(x, (0, Wn - W, 0, Hn - H), mode="reflect")
+    return xpad, (Hn - H, Wn - W)
+
 
 @torch.no_grad()
-def forward_tiled(net, x01, tile=512, overlap=32, pad_mult=8):
-    """Tiled forward pass with reflect padding and overlap blending."""
+def forward_tiled(net: torch.nn.Module, x01: torch.Tensor, tile: int = 512, overlap: int = 32, pad_mult: int = 8):
+    """Tiled forward pass with reflect padding and overlap blending.
+
+    Parameters
+    ----------
+    net : nn.Module
+        Colorization network (expects [B,3,H,W] in [0,1]).
+    x01 : torch.Tensor
+        Input batch in [0,1], shape [1,3,H,W] (batch>1 is supported but tiling loop
+        is written for B=1 typical usage).
+    tile : int
+        Tile side length (pixels). Set 0 to disable and run one-shot.
+    overlap : int
+        Overlap between adjacent tiles. Larger overlap → smoother blends → more work.
+    pad_mult : int
+        Reflect-pad so H,W are multiples of this (often the model window size).
+
+    Returns
+    -------
+    torch.Tensor
+        Colorized output with original spatial dims.
+    """
     x_pad, (ph, pw) = pad_to_multiple(x01, pad_mult)
-    _, C, H, W = x_pad.shape
+    _, _, H, W = x_pad.shape
     out = torch.zeros_like(x_pad)
-    norm = torch.zeros((1,1,H,W), device=x_pad.device, dtype=x_pad.dtype)
+    norm = torch.zeros((1, 1, H, W), device=x_pad.device, dtype=x_pad.dtype)
 
     step = tile - overlap
     for y in range(0, H, step):
         for x in range(0, W, step):
-            y0 = y; x0 = x
+            y0 = y
+            x0 = x
             y1 = min(y0 + tile, H)
             x1 = min(x0 + tile, W)
             y0i = max(0, y1 - tile)
             x0i = max(0, x1 - tile)
             patch = x_pad[:, :, y0i:y1, x0i:x1]
-            pred  = net(patch).clamp(0, 1)
+            pred = net(patch).clamp(0, 1)
             out[:, :, y0i:y1, x0i:x1] += pred
             norm[:, :, y0i:y1, x0i:x1] += 1.0
 
     out = out / norm.clamp_min(1.0)
-    # unpad back to original size
+    # Unpad back to original size
     if ph or pw:
-        out = out[:, :, :H - ph, :W - pw]
+        out = out[:, :, : H - ph, : W - pw]
     return out
 
-# ------------------ main ------------------
 
-def main():
+# =============================================================================
+# Main
+# =============================================================================
+
+def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Path to config.yml used for training")
-    ap.add_argument("--ckpt",   type=str, default=None, help="Path to trained checkpoint (.ckpt)")
+    ap.add_argument("--config", required=True, help="Path to training config.yml")
+    ap.add_argument("--ckpt", type=str, default=None, help="Path to trained checkpoint (.ckpt)")
     ap.add_argument("--test_root", type=str, default=None, help="Folder of images to colorize (overrides config)")
-    ap.add_argument("--gt_root",   type=str, default=None, help="Optional GT folder for metrics (match by filename)")
+    ap.add_argument("--gt_root", type=str, default=None, help="Optional GT folder for metrics (matched by filename)")
     ap.add_argument("--embed_dim", type=int, default=None, help="Override model.embed_dim if needed")
-    ap.add_argument("--depths",    type=int, nargs="+", default=None, help="Override model.depths if needed")
+    ap.add_argument("--depths", type=int, nargs="+", default=None, help="Override model.depths if needed")
     ap.add_argument("--amp", action="store_true", help="Enable mixed-precision inference")
     ap.add_argument("--tile", type=int, default=0, help="Enable tiled inference with this tile size (e.g., 512)")
     ap.add_argument("--overlap", type=int, default=32, help="Tile overlap (pixels)")
@@ -165,11 +264,10 @@ def main():
     ap.add_argument("--max-pixels", type=int, default=0, help="If >0, downscale so H*W<=max-pixels")
     args = ap.parse_args()
 
-    # Load + merge config
-    cfg = load_config(args.config)
-    cfg = merge_cfg_cli(cfg, args)
+    # Load + merge configuration
+    cfg = merge_cfg_cli(load_config(args.config), args)
 
-    # Resolve paths
+    # Resolve required paths
     test_root = cfg.get("predict", {}).get("test_root", None)
     gt_root   = cfg.get("predict", {}).get("gt_root", None)
     ckpt_path = cfg.get("resume", None) or cfg.get("pretrained", None) or args.ckpt
@@ -179,7 +277,7 @@ def main():
     if ckpt_path is None:
         raise RuntimeError("No checkpoint provided. Pass --ckpt or set 'resume' in config.yml to your trained .ckpt.")
 
-    # Build timestamped run folder under out_dir/predict/<exp>/YYYYmmdd_HHMMSS
+    # Timestamped run directory under out_dir/predict/<exp_name>/<stamp>/
     out_base = Path(cfg.get("out_dir", "outputs"))
     exp_name = cfg.get("exp_defaults", "exp")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -202,7 +300,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # Build model shell and load trained ckpt
+    # Build model shell and load trained checkpoint
     net = build_mambairv2_colorizer(
         upscale=int(cfg["model"]["upscale"]),
         in_chans=int(cfg["model"]["in_chans"]),
@@ -218,30 +316,38 @@ def main():
         convffn_kernel_size=int(cfg["model"]["convffn_kernel_size"]),
         mlp_ratio=float(cfg["model"]["mlp_ratio"]),
         pretrained=cfg.get("pretrained"),
-        device=device
+        device=device,
     ).eval()
 
     load_ckpt(ckpt_path, net)
 
     have_gt = gt_root is not None and os.path.isdir(gt_root)
-    lpips_list, psnr_list, ssim_list, names = [], [], [], []
+    lpips_list: list[float] = []
+    psnr_list: list[float] = []
+    ssim_list: list[float] = []
+    names: list[str] = []
 
+    # AMP on CUDA only (safe no-op on CPU)
     amp_enabled = bool(cfg.get("amp", True)) and device.type == "cuda"
     autocast_ctx = autocast if amp_enabled else nullcontext
+
     with torch.inference_mode(), autocast_ctx():
         for i, p in enumerate(files, 1):
             name = os.path.basename(p)
-            # Load input image (RGB), then convert to 3-ch grayscale for the model
+
+            # Load input image (RGB), convert to 3-channel grayscale for the model
             rgb_pil = Image.open(p).convert("RGB")
             rgb_pil = maybe_downscale_pil(rgb_pil, max_side=args.max_side, max_pixels=args.max_pixels)
+            x_in = rgb_pil_to_gray3_tensor(rgb_pil).to(device)  # [1,3,H,W]
 
-            x_in = rgb_pil_to_gray3_tensor(rgb_pil).to(device)  # (1,3,H,W)
-
-            # Run inference, optionally tiled
+            # Inference (tiled or one-shot)
             if args.tile and args.tile > 0:
                 pred_rgb = forward_tiled(
-                    net, x_in, tile=args.tile, overlap=args.overlap,
-                    pad_mult=int(cfg["model"].get("window_size", 8))
+                    net,
+                    x_in,
+                    tile=args.tile,
+                    overlap=args.overlap,
+                    pad_mult=int(cfg["model"].get("window_size", 8)),
                 )
             else:
                 pred_rgb = net(x_in)
@@ -249,18 +355,18 @@ def main():
             pred_rgb = pred_rgb.clamp(0, 1)
             save_image(pred_rgb, color_dir / name)
 
-            # Build panel
-            imgs = [x_in.clamp(0,1), pred_rgb]
+            # Prepare default panel (Gray | Pred)
+            imgs = [x_in.clamp(0, 1), pred_rgb]
             titles = ["Greyscale", "Model Prediction"]
 
-            # Optional metrics vs GT
+            # Optional metrics vs GT (matched by filename)
             if have_gt:
                 gt_path = os.path.join(gt_root, name)
                 if os.path.isfile(gt_path):
                     gt_pil = Image.open(gt_path).convert("RGB")
                     gt = T.ToTensor()(gt_pil).unsqueeze(0).to(device)
 
-                    # Size match by min-crop if needed
+                    # Size match by min-crop if needed (avoid resize artifacts in metrics)
                     H = min(gt.shape[2], pred_rgb.shape[2])
                     W = min(gt.shape[3], pred_rgb.shape[3])
                     gt = gt[:, :, :H, :W]
@@ -270,7 +376,10 @@ def main():
                     lp = float(lpips_loss(pr, gt).item())
                     ps = float(psnr_fn(pr, gt))
                     ss = float(ssim_on_tensors(pr, gt))
-                    lpips_list.append(lp); psnr_list.append(ps); ssim_list.append(ss); names.append(name)
+                    lpips_list.append(lp)
+                    psnr_list.append(ps)
+                    ssim_list.append(ss)
+                    names.append(name)
 
                     imgs = [gx, pr, gt]
                     titles = ["Gray", "Pred", "GT"]
@@ -284,11 +393,12 @@ def main():
                 imgs_cpu = [t.cpu() for t in imgs]
                 save_panel_with_titles(imgs_cpu, titles, panel_dir / name)
 
-            torch.cuda.empty_cache()
+            # Keep VRAM tidy on long runs
+            if torch.cuda.is_available() and (i % 8 == 0):
+                torch.cuda.empty_cache()
 
     # Write metrics summary if any
     if len(lpips_list) > 0:
-        import pandas as pd
         df = pd.DataFrame({"name": names, "LPIPS": lpips_list, "PSNR": psnr_list, "SSIM": ssim_list}).sort_values("name")
         csv_path = run_dir / "metrics.csv"
         df.to_csv(csv_path, index=False)
@@ -304,6 +414,7 @@ def main():
     print(f"   - Colorized images: {color_dir}")
     print(f"   - Panels:           {panel_dir}")
     print(f"   - Config copy:      {run_dir/'config_merged.yaml'}")
+
 
 if __name__ == "__main__":
     main()
