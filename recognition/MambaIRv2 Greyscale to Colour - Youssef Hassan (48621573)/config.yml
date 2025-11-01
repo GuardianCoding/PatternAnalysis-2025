@@ -1,91 +1,98 @@
-auto_download: true
-coco_root: ./datasets/coco
-exp_defaults: mamba_results
+# config.yml — Training / Inference configuration for MambaIRv2 colorization
+# All sections are grouped and commented for clarity. Values preserve your current setup.
 
-# Set these if the dataset is already downloaded, and comment out coco_root
-# Set auto_download = false
+# ==== Experiment / Output ====
+out_dir: outputs              # base output dir for runs
+exp_defaults: mamba_results   # used in naming folders
+amp: true                     # mixed precision
+
+# ==== Dataset paths ====
+auto_download: true           # if true, fetch COCO if missing
+coco_root: ./datasets/coco    # used only when auto_download is true
+# If you already have COCO locally, set auto_download: false and uncomment below:
 # train_root: /dataset/coco/train2017
 # val_root:   /dataset/coco/val2017
 # ann_root:   /dataset/coco/annotations
 
-# Two-layer knobs
-epochs: 15
-stage1_epochs: 5            # how many epochs to run with partial unfreezing
-stage1_last_k_blocks: 2     # unfreeze heads + last K blocks in Stage 1
-grad_accum: 4               # effective 8
+# ==== Data / Augmentation ====
+crop_size: 256                # divisible by 16 recommended
+hflip: true
+rgb_jitter_prob: 0.3
+rgb_jitter_strength: 0.15
+uv_input_dither: true         # chroma nudge on inputs
+uv_dither_std: 0.02
 
-# dataset-level knobs
-train_pool_size: 10000       # size of the fixed pool (built once from the train dataset)
-epoch_subset_size: 2000      # fresh random subset size per epoch
-train_pool_seed: 6767        # determinism across runs/ranks     
+# ==== Sampling (pool + epoch subset) ====
+train_pool_size: 10000
+train_pool_seed: 6767
+epoch_subset_size: 2000
+val_max_items: 64
+val_subset_seed: 6767
 
-# Validation
+# ==== DataLoader ====
+batch_size: 1
 val_batch_size: 1
-val_max_items: 64        # cap number of validation images (0 = no cap)
-val_subset_seed: 6767    # seed for deterministic val subset sampling
-
-# Hyperparameters
-stage1_lr: 3e-4 # Stage 1 lr
-lr: 2.0e-4
-min_lr: 1.0e-7
-weight_decay: 0.005
-ema_decay: 0.9995
-warmup_steps: 500
-amp: true
-
-# Saving
-save_every: 2000
-val_every: 1000
-panel_every: 200
-log_every: 100
-
-# dataloader
 num_workers: 16
 num_workers_val: 16
 prefetch_factor: 2
-batch_size: 1
-# bias colorful crops early on
-chroma_bias_try: 2               # try 4 random crops; pick the most colorful
-chroma_bias_warmup_epochs: 9     # enable for first 9 epochs
 
-# loss weights
+# ==== Model ====
+model:
+  variant: MambaIRv2
+  upscale: 1
+  in_chans: 3
+  img_size: 256
+  img_range: 1.0
+  embed_dim: 174
+  d_state: 16
+  depths: [6, 6, 6, 6, 6, 6]
+  num_heads: [6, 6, 6, 6, 6, 6]
+  window_size: 16
+  inner_rank: 64
+  num_tokens: 128
+  convffn_kernel_size: 5
+  mlp_ratio: 2.0
+
+# ==== Loss weights ====
 lambda_l1: 0.12
 lambda_lpips: 1.0
-lambda_uv: 6.0             # starting weight for chroma loss
-lambda_uv_min: 3.0         # floor value at the final epoch (>= 0.0)
-lambda_uv_schedule: cosine_hold # options: cosine | dynamic
+lambda_uv: 6.0
+lambda_uv_min: 3.0
+lambda_uv_schedule: cosine_hold   # cosine | cosine_hold | dynamic
 lambda_uv_hold_pct: 0.6
 lambda_sat: 0.05
 sat_tau: 0.05
 uv_wmin: 0.5
 uv_wmax: 2.0
+lpips_side: 160                   # LPIPS resize side for speed
 
-# aug
-crop_size: 256
-hflip: true
-rgb_jitter_prob: 0.3
-rgb_jitter_strength: 0.15
-uv_input_dither: true      # Adding nudges to yuv colours
-uv_dither_std: 0.02        # std of U/V noise
-lpips_side: 160            # LPIPS downsample
+# ==== Optimizer / LR ====
+stage1_lr: 3.0e-4                 # stage 1 LR
+lr: 2.0e-4                        # stage 2 base LR
+min_lr: 1.0e-07
+weight_decay: 0.005
+warmup_steps: 500
+ema_decay: 0.9995
 
-# model
-model:
-  variant: MambaIRv2    # for logging only
-  upscale: 1
-  in_chans: 3
-  img_size: 256
-  img_range: 1.
-  embed_dim: 174
-  d_state: 16
-  depths: [6,6,6,6,6,6]
-  num_heads: [6,6,6,6,6,6]
-  window_size: 16
-  inner_rank: 64
-  num_tokens: 128
-  convffn_kernel_size: 5
-  mlp_ratio: 2.
+# ==== Training schedule ====
+epochs: 15
+stage1_epochs: 5                  # partial unfreezing duration
+stage1_last_k_blocks: 2           # K blocks kept trainable in Stage 1
+grad_accum: 4                     # gradient accumulation
 
-# ckpt
+# ==== Logging / Checkpoints ====
+log_every: 100
+val_every: 1000
+save_every: 2000
+panel_every: 200
+plot_redraw_every: 50
+plot_smoothing: 0.0
+
+# ==== Checkpoints ====
 pretrained: checkpoints/mambairv2_ColorDN_15.pth
 resume: null
+
+# ==== Predict (inference) ====
+predict:
+  test_root:      # folder of images to colorize
+  gt_root:        # optional ground-truth folder for metrics
