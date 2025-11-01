@@ -56,9 +56,7 @@ The **MambaIRv2** backbone is an *Attentive State Space Model (SSM)* that models
 - **Input format:** Replicates grayscale luminance to 3 channels (`gray3`) for compatibility with pretrained RGB weights.  
 - **Output:** Full RGB prediction.  
 - **Loss function:**  
-  \[
-  \text{Total Loss} = \lambda_{L1} L1 + \lambda_{LPIPS} LPIPS + \lambda_{UV}(t) L_{UV} + \lambda_{SAT} L_{SAT}
-  \]
+ **Total Loss:** $= \lambda_{L1} \cdot L_{1} \;+\; \lambda_{LPIPS} \cdot L_{LPIPS} \;+\; \lambda_{UV}(t) \cdot L_{UV} \;+\; \lambda_{SAT} \cdot L_{SAT}$
   - *L1*: Charbonnier loss for reconstruction stability.  
   - *LPIPS*: Perceptual similarity.  
   - *UV*: Chroma-weighted error (weighted by ground-truth colourfulness).  
@@ -111,10 +109,7 @@ Predicted RGB Output
 ```
 
 **Loss Calculation:**
-```
-Total Loss = L1 + LPIPS + λ_uv * UV
-λ_uv(t) = λ_base * (0.4 + 0.6 * cos_decay(epoch))
-```
+$L_{total} = \lambda_{L1} \cdot L_{1} \;+\; \lambda_{LPIPS} \cdot L_{LPIPS} \;+\; \lambda_{UV}(t) \cdot L_{UV} \;+\; \lambda_{SAT} \cdot L_{SAT}$
 
 ---
 
@@ -236,19 +231,19 @@ The split used is the default split supplied by the COCO detection dataset.
 
 ## Training Strategy
 
-The training uses a **two-stage fine-tuning** pipeline for controlled adaptation from RGB→RGB weights to grayscale→RGB.
+The model is trained using a **two-stage fine-tuning** process designed to gradually adapt pretrained RGB→RGB restoration weights for the new grayscale→RGB colourization task.
 
-| Stage | Description | LR | Loss |
-|--------|--------------|------|------|
-| **Stage 1** | Freezes all but the final K blocks and heads to preserve pretrained structure. Teaches model to map grayscale inputs to colour before full fine-tuning. | 3e-4 | Charbonnier (L1) only |
-| **Stage 2** | Unfreezes all layers for end-to-end fine-tuning. | 5e-5 | L1 + LPIPS + UV + SAT (cosine-decayed λ<sub>UV</sub>) |
+| Stage | Description | Learning Rate | Loss Functions |
+|--------|--------------|----------------|----------------|
+| **Stage 1 – Structural Adaptation** | All layers except the final K high-level blocks and output heads are frozen. This phase allows the model to learn the grayscale→colour mapping while preserving the pretrained feature hierarchy. | 3e-4 | **Charbonnier (L1)** – stabilizes reconstruction and prevents large gradient spikes. |
+| **Stage 2 – Full Fine-Tuning** | All layers are unfrozen for end-to-end optimization, enabling the model to refine colour consistency and semantic detail. | 5e-5 | **L1 + LPIPS + UV + SAT**<br>• *L1:* pixel-wise consistency.<br>• *LPIPS:* perceptual similarity.<br>• *UV:* chroma-weighted loss (with cosine-decayed λ<sub>UV</sub>).<br>• *SAT:* saturation prior to prevent dull colours. |
 
-**Additional details:**
-- **Grad Accumulation:** Configurable for larger virtual batches.  
-- **WarmupCosine Scheduler:** Linear warmup then cosine decay.  
-- **EMA Tracking:** Maintains a moving average of weights.  
-- **Validation:** Every few steps using the same loss formulation.  
-- **Panel Generation:** Saves comparison grids during training for qualitative monitoring.
+**Key Features:**
+- **Warmup–Cosine LR Schedule:** Smoothly ramps up the learning rate before gradually decaying.  
+- **Gradient Accumulation:** Enables larger effective batch sizes without extra VRAM.  
+- **EMA Weights:** Maintains an exponential moving average for more stable validation.  
+- **Chroma Bias & Dithering:** Early epochs favour more colourful crops and apply small chroma noise to encourage vibrant outputs.  
+- **Validation Panels:** Qualitative side-by-side comparisons are periodically saved to monitor visual progress.
 
 ---
 
