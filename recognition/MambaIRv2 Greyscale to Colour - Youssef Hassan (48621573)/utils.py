@@ -240,12 +240,14 @@ class StatTracker:
         self.tot = []
         self.lr = []
         self.luv = []   # effective lambda_uv(t) per train step
+        self.sat = []
 
         self.val_steps = []
         self.val_lp = []
         self.val_l1 = []
         self.val_uv = []
         self.val_tot = []
+        self.val_sat = []
 
         # Smoothed
         self._ema_l1 = None
@@ -263,7 +265,11 @@ class StatTracker:
             if not self.csv_path.exists():
                 with open(self.csv_path, "w", newline="") as f:
                     w = csv.writer(f)
-                    w.writerow(["step", "loss_l1", "loss_lpips", "loss_uv", "loss_total", "lr", "lambda_uv_eff", "val_l1", "val_lpips", "val_uv", "val_total"])
+                    w.writerow([
+                    "step", "loss_l1", "loss_lpips", "loss_uv", "loss_sat", "loss_total",
+                    "lr", "lambda_uv_eff",
+                    "val_l1", "val_lpips", "val_uv", "val_sat", "val_total"
+                    ])
 
         # Plot init (only on main)
         self._headless = matplotlib.get_backend().lower() == "agg"
@@ -307,7 +313,9 @@ class StatTracker:
             w = csv.writer(f)
             w.writerow([int(epoch), float(duration_sec), int(steps), float(steps_per_sec), float(elapsed)])
 
-    def log_train(self, step: int, loss_l1: float, loss_lp: float, loss_uv: Optional[float], total_loss: Optional[float], lr: float, lambda_uv_eff: Optional[float] = None):
+    def log_train(self, step: int, loss_l1: float, loss_lp: float, loss_uv: Optional[float],
+              loss_sat: Optional[float], total_loss: Optional[float], lr: float,
+              lambda_uv_eff: Optional[float] = None):
         """Record a training step. total_loss can be None; we’ll compute loss_l1+loss_lp if so."""
         if total_loss is None:
             total_loss = float(loss_l1) + float(loss_lp)
@@ -323,6 +331,7 @@ class StatTracker:
         self.lr.append(float(lr))
         self.uv.append(float(loss_uv))
         self.luv.append(float(lambda_uv_eff))
+        self.sat.append(float(loss_sat) if loss_sat is not None else 0.0)
 
         # EMA smoothing (for display only)
         if self.smoothing > 0:
@@ -332,25 +341,27 @@ class StatTracker:
 
         # Append row to CSV
         if self.is_main:
-            self._append_csv(step, loss_l1, loss_lp, loss_uv, total_loss, lr, lambda_uv_eff, val_l1=None, val_lp=None, val_uv=None, val_total=None)
+            self._append_csv(step, loss_l1, loss_lp, loss_uv, loss_sat, total_loss, lr, lambda_uv_eff,
+                 val_l1=None, val_lp=None, val_uv=None, val_sat=None, val_total=None)
 
         # Redraw if needed
         if self.is_main and (step - self._last_redraw_step) >= self.redraw_every:
             self.redraw()
 
-    def log_val(self, step: int, loss_l1: float, loss_lp: float, loss_uv: float, loss_total: float):
+    def log_val(self, step: int, loss_l1: float, loss_lp: float, loss_uv: float, loss_sat: float, loss_total: float):
         """Record validation metrics (L1, LPIPS, UV, Total) and update plot."""
         step = int(step)
         self.val_steps.append(step)
         self.val_l1.append(float(loss_l1))
         self.val_lp.append(float(loss_lp))
         self.val_uv.append(float(loss_uv))
+        self.val_sat.append(float(loss_sat))
         self.val_tot.append(float(loss_total))
 
         if self.is_main:
             self._append_csv(step,
-                            loss_l1=None, loss_lp=None, loss_uv=None, total_loss=None, lr=None, lambda_uv_eff=None,
-                            val_l1=loss_l1, val_lp=loss_lp, val_uv=loss_uv, val_total=loss_total)
+                loss_l1=None, loss_lp=None, loss_uv=None, loss_sat=None, total_loss=None, lr=None, lambda_uv_eff=None,
+                val_l1=loss_l1, val_lp=loss_lp, val_uv=loss_uv, val_sat=loss_sat, val_total=loss_total)
             self.redraw(force=True)
 
     def redraw(self, force: bool = False):
@@ -399,6 +410,7 @@ class StatTracker:
         (l1_line,) = self.ax_train.plot([], [], label="L1")
         (lp_line,) = self.ax_train.plot([], [], label="LPIPS")
         (uv_line,) = self.ax_train.plot([], [], label="UV")
+        (sat_line,) = self.ax_train.plot([], [], label="SAT")
         (tot_line,) = self.ax_train.plot([], [], label="Total")
         (lr_line,) = self.ax_train.plot([], [], label="LR (scaled)")
         (luv_line,) = self.ax_train.plot([], [], label="λ_uv (scaled)")
@@ -409,11 +421,12 @@ class StatTracker:
         self.ax_train.legend(loc="upper right")
 
         self.lines.update({
-            "l1": l1_line,
-            "lp": lp_line,
-            "uv": uv_line,
-            "tot": tot_line,
-            "lr": lr_line,
+            "l1": l1_line, 
+            "lp": lp_line, 
+            "uv": uv_line, 
+            "sat": sat_line,
+            "tot": tot_line, 
+            "lr": lr_line, 
             "luv": luv_line,
         })
 
@@ -421,6 +434,7 @@ class StatTracker:
         (vl1_line,)  = self.ax_val.plot([], [], label="Val L1")
         (vlp_line,)  = self.ax_val.plot([], [], label="Val LPIPS")
         (vuv_line,)  = self.ax_val.plot([], [], label="Val UV")
+        (vsat_line,) = self.ax_val.plot([], [], label="Val SAT")
         (vtot_line,) = self.ax_val.plot([], [], label="Val Total")
 
         self.ax_val.set_title("Validation losses")
@@ -429,9 +443,10 @@ class StatTracker:
         self.ax_val.legend(loc="upper right")
 
         self.lines.update({
-            "val_l1": vl1_line,
-            "val_lp": vlp_line,
+            "val_l1": vl1_line, 
+            "val_lp": vlp_line, 
             "val_uv": vuv_line,
+            "val_sat": vsat_line, 
             "val_tot": vtot_line,
         })
 
@@ -440,93 +455,94 @@ class StatTracker:
             plt.pause(0.001)
 
     def _update_train_axes(self):
+        """Update training plot lines and axis limits."""
         x = self.steps
         if not x:
             return
+        y_l1 = self.l1
+        y_lp = self.lp
+        y_uv = self.uv
+        y_sat = self.sat
+        y_tot = self.total
+        y_lr = [lr * 10 for lr in self.lr]  # scaled for visibility
+        y_luv = self.lambda_uv_eff
 
-        l1 = self._series(self.l1, self._ema_l1)
-        lp = self._series(self.lp, self._ema_lp)
-        tot = self._series(self.tot, self._ema_tot)
-        uv = self.uv
+        # Update line data
+        self.lines["l1"].set_data(x, y_l1)
+        self.lines["lp"].set_data(x, y_lp)
+        self.lines["uv"].set_data(x, y_uv)
+        self.lines["sat"].set_data(x, y_sat)
+        self.lines["tot"].set_data(x, y_tot)
+        self.lines["lr"].set_data(x, y_lr)
+        self.lines["luv"].set_data(x, y_luv)
 
-        if self.lr:
-            lrmax = max(self.lr)
-            scale = max(1e-12, lrmax)
-            base = max(1e-6, (sum(tot) / len(tot)) if tot else 1.0)
-            lr_scaled = [v / scale * base for v in self.lr]
-        else:
-            lr_scaled = []
-
-        # Scale λ_uv to roughly the same range as losses
-        if self.luv:
-            luvmax = max(self.luv)
-            luv_scale = max(1e-12, luvmax)
-            base = max(1e-6, (sum(tot) / len(tot)) if tot else 1.0)
-            luv_scaled = [v / luv_scale * base for v in self.luv]
-        else:
-            luv_scaled = []
-
-        self.lines["l1"].set_data(x, l1)
-        self.lines["lp"].set_data(x, lp)
-        self.lines["tot"].set_data(x, tot)
-        self.lines["lr"].set_data(x, lr_scaled)
-        self.lines["uv"].set_data(x, uv)
-        self.lines["luv"].set_data(x, luv_scaled)
-
-        xmin, xmax = min(x), max(x)
-        self.ax_train.set_xlim(xmin, xmax if xmax > xmin else xmin + 1)
-
-        y_vals = []
-        y_vals += l1 if l1 else []
-        y_vals += lp if lp else []
-        y_vals += tot if tot else []
-        y_vals += lr_scaled if lr_scaled else []
-        y_vals += luv_scaled if luv_scaled else []
-        y_vals += uv if uv else []
-        if y_vals:
-            ymin, ymax = min(y_vals), max(y_vals)
-            pad = 0.05 * (ymax - ymin + 1e-12)
+        # Adjust x/y limits dynamically
+        if len(x) > 1:
+            xmin, xmax = min(x), max(x)
+            self.ax_train.set_xlim(xmin, xmax)
+        y_all = []
+        if y_l1:  y_all += y_l1
+        if y_lp:  y_all += y_lp
+        if y_uv:  y_all += y_uv
+        if y_sat: y_all += y_sat
+        if y_tot: y_all += y_tot
+        if len(y_all) > 0:
+            ymin, ymax = min(y_all), max(y_all)
+            pad = (ymax - ymin) * 0.1 if ymax != ymin else 0.1
             self.ax_train.set_ylim(ymin - pad, ymax + pad)
+
+        self.ax_train.relim()
+        self.ax_train.autoscale_view()
+        self.ax_train.legend(loc="upper right")
 
         elapsed = time.time() - self._t0
         self.ax_train.set_title(f"Train losses / LR  |  steps={xmax}  |  {elapsed/60.0:.1f} min")
 
     def _update_val_axes(self):
+        """Update validation plot lines and axis limits."""
         xv = self.val_steps
         if not xv:
             return
 
-        y_l1  = self.val_l1
-        y_lp  = self.val_lp
-        y_uv  = self.val_uv
-        y_tot = self.val_tot
+        y_l1 = self.val_l1
+        y_lp = self.val_lp
+        y_uv = self.val_uv
+        y_sat = self.val_sat
+        y_tot = self.val_total
 
-        # Set data for each line
+        # Update line data
         self.lines["val_l1"].set_data(xv, y_l1)
         self.lines["val_lp"].set_data(xv, y_lp)
         self.lines["val_uv"].set_data(xv, y_uv)
+        self.lines["val_sat"].set_data(xv, y_sat)
         self.lines["val_tot"].set_data(xv, y_tot)
 
-        # X limits
-        xmin, xmax = min(xv), max(xv)
-        self.ax_val.set_xlim(xmin, xmax if xmax > xmin else xmin + 1)
+        # Adjust x/y limits dynamically
+        if len(xv) > 1:
+            xmin, xmax = min(xv), max(xv)
+            self.ax_val.set_xlim(xmin, xmax)
 
-        # Y limits from all series
         y_all = []
         if y_l1:  y_all += y_l1
         if y_lp:  y_all += y_lp
         if y_uv:  y_all += y_uv
+        if y_sat: y_all += y_sat
         if y_tot: y_all += y_tot
-        if y_all:
+        if len(y_all) > 0:
             ymin, ymax = min(y_all), max(y_all)
-            pad = 0.05 * (ymax - ymin + 1e-12)
+            pad = (ymax - ymin) * 0.1 if ymax != ymin else 0.1
             self.ax_val.set_ylim(ymin - pad, ymax + pad)
+
+        self.ax_val.relim()
+        self.ax_val.autoscale_view()
+        self.ax_val.legend(loc="upper right")
 
         best_lp = min(y_lp) if y_lp else float("nan")
         last_tot = y_tot[-1] if y_tot else float("nan")
         self.ax_val.set_title(f"Validation losses  |  best LPIPS={best_lp:.4f}  |  last TOTAL={last_tot:.4f}")
 
-    def _append_csv(self, step, loss_l1, loss_lp, loss_uv, total_loss, lr, lambda_uv_eff, val_l1, val_lp, val_uv, val_total):
+    def _append_csv(self, step, loss_l1, loss_lp, loss_uv, loss_sat, total_loss, lr, lambda_uv_eff,
+                val_l1, val_lp, val_uv, val_sat, val_total):
         with open(self.csv_path, "a", newline="") as f:
             w = csv.writer(f)
             w.writerow([
@@ -534,12 +550,14 @@ class StatTracker:
                 loss_l1 if loss_l1 is not None else "",
                 loss_lp if loss_lp is not None else "",
                 loss_uv if loss_uv is not None else "",
+                loss_sat if loss_sat is not None else "",
                 total_loss if total_loss is not None else "",
                 lr if lr is not None else "",
                 lambda_uv_eff if lambda_uv_eff is not None else "",
                 val_l1 if val_l1 is not None else "",
                 val_lp if val_lp is not None else "",
                 val_uv if val_uv is not None else "",
+                val_sat if val_sat is not None else "",
                 val_total if val_total is not None else "",
             ])
 

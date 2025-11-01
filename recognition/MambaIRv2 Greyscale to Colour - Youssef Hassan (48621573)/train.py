@@ -152,6 +152,79 @@ def cosine_hold_decay_lambda_uv(epoch: int, total_epochs: int, start: float, end
     cos = 0.5 * (1 + math.cos(math.pi * min(1.0, max(0.0, t))))
     return float(end + (start - end) * cos)
 
+# ------------------------- Validation Loop ----------------------------
+def validate(net: Module, val_loader, ema,
+             epoch, total_epochs,
+             tracker: StatTracker, global_step: int, 
+             device, cfg, is_main:bool, use_ddp,
+             out_root, best_total,
+             opt, scaler,):
+    net.eval()
+    val_l1 = val_lp = val_uv = val_sat = val_total = 0.0
+    n_count = 0
+
+    lambda_uv_sched = str(cfg.get('lambda_uv_schedule', 'cosine')).lower()
+    lambda_uv      = float(cfg.get('lambda_uv', 6.0))
+    lambda_uv_min  = float(cfg.get('lambda_uv_min', 3.0))
+    hold_pct       = float(cfg.get('lambda_uv_hold_pct', 0.6))
+    w_l1           = float(cfg.get('lambda_l1', 0.12))
+    w_lp           = float(cfg.get('lambda_lpips', 1.0))
+    lam_sat        = float(cfg.get('lambda_sat', 0.05))
+    uv_wmin        = float(cfg.get('uv_wmin', 0.5))
+    uv_wmax        = float(cfg.get('uv_wmax', 2.0))
+
+    with torch.no_grad():
+        for batch in val_loader:
+            x_v, y_v = batch if (isinstance(batch, (list, tuple)) and len(batch) >= 2) else (batch[0], batch[1])
+            x_v = x_v.to(device, non_blocking=True)
+            y_v = y_v.to(device, non_blocking=True)
+
+            # EMA eval if present
+            if ema is not None:
+                with ema.average_parameters():
+                    pred_v = net(x_v)
+            else:
+                pred_v = net(x_v)
+
+            # --- component losses (match training) ---
+            l1 = F.l1_loss(pred_v, y_v).item()
+            lp = float(lpips_loss(pred_v, y_v).item())
+            uv = float(chroma_weighted_uv_loss(pred_v, y_v, wmin=uv_wmin, wmax=uv_wmax).item())
+            sat_v = float(saturation_prior(pred_v, y_v, tau=float(cfg.get('sat_tau', 0.05))).item())
+
+            # --- λ_uv schedule (match training) ---
+            if lambda_uv_sched == "cosine_hold":
+                lambda_uv_eff_v = cosine_hold_decay_lambda_uv(epoch, total_epochs, lambda_uv, lambda_uv_min, hold_pct=hold_pct)
+            elif lambda_uv_sched == "cosine":
+                lambda_uv_eff_v = cosine_decay_lambda_uv(epoch, total_epochs, lambda_uv, lambda_uv_min)
+            else:
+                lambda_uv_eff_v = dynamic_chroma_weighting(epoch, total_epochs, lambda_uv)
+
+            total = (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff_v * uv) + (lam_sat * sat_v)
+
+            val_l1   += l1
+            val_lp   += lp
+            val_uv   += uv
+            val_sat  += sat_v
+            val_total += total
+            n_count  += 1
+
+    # --- averages + tracker ---
+    if n_count > 0:
+        avg_l1   = val_l1 / n_count
+        avg_lp   = val_lp / n_count
+        avg_uv   = val_uv / n_count
+        avg_sat  = val_sat / n_count
+        avg_total = val_total / n_count
+
+    tracker.log_val(global_step, loss_l1=avg_l1, loss_lp=avg_lp, loss_uv=avg_uv, loss_sat=avg_sat, loss_total=avg_total)
+    print(f"[val] step={global_step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} SAT= {val_sat:.4f} TOTAL={avg_total:.4f}")
+    
+    if (avg_total < best_total):
+        if is_main:
+            save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
+                    opt, scaler, global_step, avg_total, ema)
+
 # ----------------------- Epoch running script --------------------------
 def run_training_epochs(
     net: Module, opt, sched, scaler, ema,
@@ -180,15 +253,16 @@ def run_training_epochs(
     train_wall_start = time.time()
 
     for epoch in range(start_epoch, end_epoch + 1):
+        # Select more colourfull crops
+        warm = int(cfg.get('chroma_bias_warmup_epochs', 0))
+        if hasattr(base_train_ds, 'set_bias_active'):
+            base_train_ds.set_bias_active(epoch <= warm)
+
         # --- build per-epoch dataloader over a fresh random subset from the fixed pool
         epoch_indices = sample_epoch_indices(pool_indices, epoch_subset_size, seed=pool_seed, epoch=epoch)
         train_loader, train_samp = build_epoch_subset_loader(base_train_ds, epoch_indices, cfg, use_ddp, rank)
         if use_ddp and train_samp is not None:
             train_samp.set_epoch(epoch)
-        
-        warm = int(cfg.get('chroma_bias_warmup_epochs', 0))
-        if hasattr(train_loader.dataset, 'set_bias_active'):
-            train_loader.dataset.set_bias_active(epoch <= warm)
 
         # ---- epoch timing start ----
         epoch_start = time.time()
@@ -261,8 +335,8 @@ def run_training_epochs(
             # lightweight log (rank 0 only)
             if is_main and global_step % log_every == 0:
                 current_lr = opt.param_groups[0]["lr"]
-                total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv).item()
-                tracker.log_train(global_step, loss_l1.item(), loss_lp.item(), loss_uv.item(), total_now, current_lr, lambda_uv_eff=float(lambda_uv_eff))
+                total_now = (w_l1 * loss_l1 + w_lp * loss_lp + lambda_uv_eff * loss_uv + lam_sat * loss_sat).item()
+                tracker.log_train(global_step, loss_l1.item(), loss_lp.item(), loss_uv.item(), float(loss_sat.item()), total_now, current_lr, lambda_uv_eff=float(lambda_uv_eff))
                 print(f"[{epoch}] step={global_step} l1={loss_l1.item():.4f} lp={loss_lp.item():.4f} uv={loss_uv.item():.4f} lambda_uv={lambda_uv_eff:.3f} loss_total = {total_now:.4f} lr={current_lr:.2e}")
 
             # ------------- periodic sample panel (rank 0 only) -------------
@@ -289,78 +363,11 @@ def run_training_epochs(
 
             # validate (rank 0 only)
             if is_main and val_every > 0 and global_step % val_every == 0:
-                net.eval()
-                if ema is not None:
-                    bak = (net.module if use_ddp else net).state_dict()
-                    ema.apply_to(net.module if use_ddp else net)
-
-                # accumulators
-                val_l1, val_lp, val_uv, val_total, n_count = 0.0, 0.0, 0.0, 0.0, 0
-
-                with torch.no_grad():
-                    for x_v, y_v, _ in eval_loader:
-                        x_v  = x_v.to(device)
-                        y_v  = y_v.to(device)
-
-                        pred_v = net(x_v)
-
-                        # L1/Charbonnier (same as train)
-                        l1 = charbonnier(pred_v, y_v).item()
-
-                        # LPIPS on resized tensors (same size used in train)
-                        pr_s = F.interpolate(pred_v, size=lpips_side, mode="bilinear", align_corners=False)
-                        gt_s = F.interpolate(y_v,   size=lpips_side, mode="bilinear", align_corners=False)
-                        lp = lpips_loss(pr_s, gt_s).item()
-
-                        # UV chroma-only term (same as train)
-                        _, u1, v1 = rgb_to_yuv(pred_v)
-                        _, u2, v2 = rgb_to_yuv(y_v)
-                        uv = (F.l1_loss(u1, u2) + F.l1_loss(v1, v2)).item()
-
-                        # per-epoch UV weight (match train-side choice, using total_epochs)
-                        if lambda_uv_sched == "cosine":
-                            lambda_uv_eff_v = cosine_decay_lambda_uv(epoch, total_epochs, lambda_uv, lambda_uv_min)
-                        else:
-                            lambda_uv_eff_v = dynamic_chroma_weighting(epoch, total_epochs, lambda_uv)
-
-                        # accumulate raw components + weighted total
-                        loss_sat_v = saturation_prior(pred_v, y_v, tau=float(cfg.get('sat_tau', 0.05)))
-                        lam_sat = float(cfg.get('lambda_sat', 0.05))
-                        val_l1   += l1
-                        val_lp   += lp
-                        val_uv   += uv
-                        val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff_v * uv) + (lam_sat * loss_sat_v)
-                        n_count += 1
-
-                # means
-                avg_l1    = val_l1 / max(n_count, 1)
-                avg_lp    = val_lp / max(n_count, 1)
-                avg_uv    = val_uv / max(n_count, 1)
-                avg_total = val_total / max(n_count, 1)
-
-                if is_main:
-                    tracker.log_val(global_step, avg_l1, avg_lp, avg_uv, avg_total)
-                    print(f"[val] step={global_step} L1={avg_l1:.4f} LPIPS={avg_lp:.4f} UV={avg_uv:.4f} TOTAL={avg_total:.4f}")
-
-                if ema is not None:
-                    (net.module if use_ddp else net).load_state_dict(bak, strict=False)
-                net.train()
-
-                best_on = str(cfg.get('best_on', 'total')).lower()
-                if (best_on == 'lpips' and avg_lp < getattr(main, 'best_lp', float('inf'))) or (best_on != 'lpips' and avg_total < best_total):
-                    if best_on == 'lpips':
-                        try:
-                            main.best_lp = avg_lp
-                        except Exception:
-                            pass
-                        if is_main:
-                            save_ckpt(out_root/"best_lpips.ckpt", net.module if use_ddp else net,
-                                    opt, scaler, global_step, best_total, ema)
-                    else:
-                        best_total = avg_total
-                        if is_main:
-                            save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
-                                    opt, scaler, global_step, best_total, ema)
+                validate(net=net, val_loader=eval_loader, ema=ema, 
+                         epoch=epoch, total_epochs=total_epochs, tracker=tracker, 
+                         global_step=global_step,device=device, cfg=cfg,
+                         is_main=is_main, use_ddp=use_ddp, out_root=out_root, 
+                         opt=opt, scaler=scaler, best_total=best_total)                
 
             # periodic checkpoint (rank 0 only)
             if is_main and save_every > 0 and global_step % save_every == 0:
@@ -527,6 +534,7 @@ def main():
     weight_decay     = float(cfg.get("weight_decay", 1e-4))
     min_lr           = float(cfg.get("min_lr", 1e-5))
     warmup_steps     = int(cfg.get("warmup_steps", 500))
+    best_total = math.inf
 
     rank = (dist.get_rank() if use_ddp else 0)
 
