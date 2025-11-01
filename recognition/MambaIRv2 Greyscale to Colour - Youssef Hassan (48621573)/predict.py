@@ -48,7 +48,7 @@ from torch.cuda.amp import autocast
 from contextlib import nullcontext
 
 from modules import build_mambairv2_colorizer
-from utils import lpips_loss, psnr as psnr_fn, save_panel_with_titles
+from utils import lpips_loss, psnr as psnr_fn, save_panel_with_titles, load_ckpt
 
 # ------------------ helpers ------------------
 
@@ -222,9 +222,10 @@ def main():
         num_tokens=int(cfg["model"]["num_tokens"]),
         convffn_kernel_size=int(cfg["model"]["convffn_kernel_size"]),
         mlp_ratio=float(cfg["model"]["mlp_ratio"]),
-        pretrained=cfg.get("pretrained"),
         device=device
     ).eval()
+
+    load_ckpt(cfg.get("pretrained"), net)
 
     have_gt = gt_root is not None and os.path.isdir(gt_root)
     lpips_list, psnr_list, ssim_list, names = [], [], [], []
