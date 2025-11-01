@@ -1,5 +1,5 @@
 # config.yml — Training / Inference configuration for MambaIRv2 colorization
-# All sections are grouped and commented for clarity. Values preserve your current setup.
+# All sections are grouped and commented for clarity.
 
 # ==== Experiment / Output ====
 out_dir: outputs              # base output dir for runs
