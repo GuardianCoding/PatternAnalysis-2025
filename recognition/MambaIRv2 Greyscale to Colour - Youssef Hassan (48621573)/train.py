@@ -182,7 +182,7 @@ def validate(net: Module, val_loader, ema: EMA,
             swapped = True
 
         for batch in val_loader:
-            x_v, y_v = batch if (isinstance(batch, (list, tuple)) and len(batch) >= 2) else (batch[0], batch[1])
+            x_v, y_v = batch[0], batch[1]
             x_v = x_v.to(device, non_blocking=True)
             y_v = y_v.to(device, non_blocking=True)
 
@@ -278,10 +278,7 @@ def run_training_epochs(
 
         for batch in train_loader:
             steps_in_epoch += 1
-            if isinstance(batch, (list, tuple)) and len(batch) == 3:
-                x_in, y_tgt, _ = batch
-            else:
-                x_in, y_tgt = batch
+            x_in, y_tgt = batch[0], batch[1]
 
             x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
             y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
@@ -376,7 +373,7 @@ def run_training_epochs(
 
             # periodic checkpoint (rank 0 only)
             if is_main and save_every > 0 and global_step % save_every == 0:
-                save_ckpt(out_root/"checkpoints"/f"step_{global_step}.ckpt", net.module if use_ddp else net, opt, scaler, global_step, best_total, ema)
+                save_ckpt(out_root / "checkpoints" / f"step_{global_step}.ckpt", net.module if use_ddp else net, opt, scaler, global_step, best_total, ema)
 
             if global_step % 25 == 0:
                 torch.cuda.empty_cache()
