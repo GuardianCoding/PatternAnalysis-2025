@@ -196,6 +196,10 @@ def run_training_epochs(
         for x_in, y_tgt, _ in train_loader:
             steps_in_epoch += 1
 
+            warm = int(cfg.get('chroma_bias_warmup_epochs', 0))
+            if hasattr(train_loader.dataset, 'set_bias_active'):
+                train_loader.dataset.set_bias_active(epoch <= warm)
+
             x_in  = x_in.to(device, non_blocking=True, memory_format=torch.channels_last)    # [B,3,H,W] grayscale replicated
             y_tgt = y_tgt.to(device, non_blocking=True, memory_format=torch.channels_last)   # [B,3,H,W] true color
 
@@ -323,7 +327,6 @@ def run_training_epochs(
                         val_uv   += uv
                         val_total += (w_l1 * l1) + (w_lp * lp) + (lambda_uv_eff_v * uv) + (lam_sat * loss_sat_v)
 
-
                 # means
                 avg_l1    = val_l1 / max(n_count, 1)
                 avg_lp    = val_lp / max(n_count, 1)
@@ -338,28 +341,25 @@ def run_training_epochs(
                     (net.module if use_ddp else net).load_state_dict(bak, strict=False)
                 net.train()
 
-                # select best by TOTAL (more stable than LPIPS-alone for colorization)
-                if avg_total < best_total and is_main:
-                    best_total = avg_total
-                    save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
-                              opt, scaler, global_step, best_total, ema)
+                best_on = str(cfg.get('best_on', 'total')).lower()
+                if (best_on == 'lpips' and avg_lp < getattr(main, 'best_lp', float('inf'))) or (best_on != 'lpips' and avg_total < best_total):
+                    if best_on == 'lpips':
+                        try:
+                            main.best_lp = avg_lp
+                        except Exception:
+                            pass
+                        if is_main:
+                            save_ckpt(out_root/"best_lpips.ckpt", net.module if use_ddp else net,
+                                    opt, scaler, global_step, best_total, ema)
+                    else:
+                        best_total = avg_total
+                        if is_main:
+                            save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
+                                    opt, scaler, global_step, best_total, ema)
 
             # periodic checkpoint (rank 0 only)
-            best_on = str(cfg.get('best_on', 'total')).lower()
-            if (best_on == 'lpips' and avg_lp < getattr(main, 'best_lp', float('inf'))) or (best_on != 'lpips' and avg_total < best_total):
-                if best_on == 'lpips':
-                    try:
-                        main.best_lp = avg_lp
-                    except Exception:
-                        pass
-                    if is_main:
-                        save_ckpt(out_root/"best_lpips.ckpt", net.module if use_ddp else net,
-                                opt, scaler, global_step, best_total, ema)
-                else:
-                    best_total = avg_total
-                    if is_main:
-                        save_ckpt(out_root/"best_total.ckpt", net.module if use_ddp else net,
-                                opt, scaler, global_step, best_total, ema)
+            if is_main and save_every > 0 and global_step % save_every == 0:
+                save_ckpt(out_root/f"step_{global_step}.ckpt", net.module if use_ddp else net, opt, scaler, global_step, best_total, ema)
 
             if global_step % 25 == 0:
                 torch.cuda.empty_cache()

@@ -187,9 +187,9 @@ class CocoColorisationTrain(Dataset):
         return F.to_pil_image(t)
 
     def __getitem__(self, index: int):
-        img_info = self.ds.loadImgs([self.ids[index]])[0]
-        path = Path(self.root) / img_info["file_name"]
-        img = Image.open(path).convert("RGB")
+        img, _ = self.ds[index]
+        if img.mode != "RGB":
+            img = img.convert("RGB")
 
         # ---------- random crop with chroma bias ------------
         best_crop = None
@@ -215,12 +215,7 @@ class CocoColorisationTrain(Dataset):
             img = F.hflip(img)
 
         if random.random() < self.rgb_jitter_prob:
-            img = transforms.ColorJitter(
-                brightness=self.rgb_jitter_strength,
-                contrast=self.rgb_jitter_strength,
-                saturation=self.rgb_jitter_strength,
-                hue=0.02,
-                )(img)
+            img = self._jitter_rgb(img)
 
         img = F.to_tensor(img)
         # grayscale input (1xHxW repeated to 3 channels)
@@ -322,6 +317,8 @@ def build_coco_dataloaders(
         rgb_jitter_prob=float(cfg.get("rgb_jitter_prob", 0.2)),
         rgb_jitter_strength=float(cfg.get("rgb_jitter_strength", 0.1)),
         longside_scale_range=tuple(cfg.get("longside_scale_range", (1.00, 1.15))),
+        chroma_bias_try=int(cfg.get("chroma_bias_try", 0)),
+        chroma_bias_warmup_epochs=int(cfg.get("chroma_bias_warmup_epochs", 0))
     )
 
     # ---- optional: cap training set size with a deterministic subset ----
