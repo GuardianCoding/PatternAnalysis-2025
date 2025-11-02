@@ -1,7 +1,7 @@
 # 🖼️ Greyscale to Colour Image Conversion using MambaIRv2
 
 **Author:** Youssef Hassan (48621573)  
-**Course:** COMP3710 – Pattern Analysis (2025)  
+**Course:** COMP3710 – Pattern Recognition and Analysis (2025)  
 **Difficulty:** Hard
 
 ---
@@ -31,20 +31,20 @@
 
 ## Overview
 
-This repository fine-tunes **MambaIRv2**, an advanced **state-space image restoration model**, to perform **grayscale-to-colour conversion**.  
-The project adapts pretrained RGB→RGB restoration weights (`mambairv2_ColorDN_15`) for grayscale→RGB mapping using a three-part composite loss: **L1**, **LPIPS**, and **chroma-aware YUV**.  
+This repository fine-tunes **MambaIRv2**, an advanced **state-space image restoration model**, to perform **greyscale-to-colour conversion**.  
+The project adapts pretrained RGB→RGB restoration weights (`mambairv2_ColorDN_15`) for greyscale→RGB mapping using a four-part composite loss: **L1**, **LPIPS**, **chroma-aware YUV**, and **saturation prior (SAT)**.  
 The approach produces high-quality, perceptually realistic colour reconstructions from single-channel images and is fully reproducible through its provided configuration, datasets, and training scripts.
 
 ---
 
 ## Problem Statement
 
-Grayscale colourization is a **challenging inverse problem** — one intensity pattern can map to many valid colour combinations. The model must infer context, texture, and semantics to produce convincing colour.  
+Greyscale colourization is a **challenging inverse problem** — one intensity pattern can map to many valid colour combinations. The model must infer context, texture, and semantics to produce convincing colour.  
 This project’s objective is to generate accurate and perceptually consistent colours while maintaining structural integrity.  
 Challenges addressed:
 - Missing chroma data → inferred via learned semantics.  
 - Avoiding oversaturation or washed-out colours.  
-- Maintaining luminance detail from grayscale input.  
+- Maintaining luminance detail from greyscale input.  
 
 ---
 
@@ -53,7 +53,7 @@ Challenges addressed:
 The **MambaIRv2** backbone is an *Attentive State Space Model (SSM)* that models long-range image dependencies with linear time complexity, replacing attention with selective SSM layers.
 
 ### Adaptations for Colourization
-- **Input format:** Replicates grayscale luminance to 3 channels (`gray3`) for compatibility with pretrained RGB weights.  
+- **Input format:** Replicates greyscale luminance to 3 channels (`grey3`) for compatibility with pretrained RGB weights.  
 - **Output:** Full RGB prediction.  
 - **Loss function:**  
  **Total Loss:** $= \lambda_{L1} \cdot L_{1} \;+\; \lambda_{LPIPS} \cdot L_{LPIPS} \;+\; \lambda_{UV}(t) \cdot L_{UV} \;+\; \lambda_{SAT} \cdot L_{SAT}$
@@ -95,7 +95,7 @@ In MambaIRv2, these state-space blocks are stacked hierarchically to capture bot
 ```
 Input (Greyscale)
    ↓
-Gray → Equalize → Stack (Y³)
+grey → Equalize → Stack (Y³)
    ↓
 conv_first
    ↓
@@ -116,7 +116,7 @@ $L_{total} = \lambda_{L1} \cdot L_{1} \;+\; \lambda_{LPIPS} \cdot L_{LPIPS} \;+\
 ## How It Works
 
 1. **Dataset Handling:** Loads COCO-2017 automatically (train/val split).  
-2. **Preprocessing:** Each RGB sample → equalised grayscale input (`gray3`).  
+2. **Preprocessing:** Each RGB sample → equalised greyscale input (`grey3`).  
 3. **Training Pipeline:**  
    - Uses pretrained MambaIRv2 weights for transfer learning.  
    - Losses are balanced adaptively via cosine scheduling.  
@@ -126,6 +126,9 @@ $L_{total} = \lambda_{L1} \cdot L_{1} \;+\; \lambda_{LPIPS} \cdot L_{LPIPS} \;+\
    - Tracks per-step losses via `StatTracker`.  
    - Produces live `plots.svg` and `logs/train_log.csv`.  
    - Exports comparison panels (`outputs/.../panels`).  
+
+> Below is an example of a panel outputted during training:
+![Example Panel from Training](./assets/step_0018000.jpg)
 
 ---
 
@@ -159,7 +162,7 @@ A breakdown of each major component for clarity:
 |------|--------------|
 | `train.py` | Main training script: handles dataloaders, optimization, logging, and checkpointing. |
 | `predict.py` | Inference pipeline: loads trained checkpoint, performs batched or tiled prediction, and saves panels. |
-| `dataset.py` | Data loading utilities: COCO dataset handling, augmentations, grayscale replication. |
+| `dataset.py` | Data loading utilities: COCO dataset handling, augmentations, greyscale replication. |
 | `modules.py` | MambaIRv2 model definition, including colourization head and modified loss outputs. |
 | `utils.py` | Helper functions for YUV conversion, LPIPS loss computation, metric tracking, and cosine decay scheduling. |
 | `config.yml` | Central configuration file for hyperparameters and paths. |
@@ -213,7 +216,7 @@ Use `make setup` for first-time setup, or `make reinstall` after editing depende
 | **Crop** | Random 256×256 crop (colour-biased selection for early epochs) |
 | **Flip** | 50% horizontal flip |
 | **Augment** | Brightness, contrast, and saturation jitter (probability set in config) |
-| **Convert** | RGB → grayscale → replicated to 3 channels (`gray3`) |
+| **Convert** | RGB → greyscale → replicated to 3 channels (`grey3`) |
 
 **Chroma Bias:**  
 During early epochs, multiple random crops are sampled and the most colourful patch is chosen (`chroma_bias_try`). This gradually disables after warmup.
@@ -224,6 +227,9 @@ Each epoch draws a deterministic subset of the dataset from a fixed random pool 
 **Train/Validation Split:**  
 The split used is the default split supplied by the COCO detection dataset. 
 
+**Random Seeds:**
+Random seeds and deterministic dataloader options are fixed to ensure identical results across runs.
+
 > **Warning:** The COCO dataset is quite large (**~40GB**) of data.
 > Ensure you have enough space, or download a smaller set manually and override the `auto_download` argument in `config.yml` and replace the dataset paths.
 
@@ -231,11 +237,11 @@ The split used is the default split supplied by the COCO detection dataset.
 
 ## Training Strategy
 
-The model is trained using a **two-stage fine-tuning** process designed to gradually adapt pretrained RGB→RGB restoration weights for the new grayscale→RGB colourization task.
+The model is trained using a **two-stage fine-tuning** process designed to gradually adapt pretrained RGB→RGB restoration weights for the new greyscale→RGB colourization task.
 
 | Stage | Description | Learning Rate | Loss Functions |
 |--------|--------------|----------------|----------------|
-| **Stage 1 – Structural Adaptation** | All layers except the final K high-level blocks and output heads are frozen. This phase allows the model to learn the grayscale→colour mapping while preserving the pretrained feature hierarchy. | 3e-4 | **Charbonnier (L1)** – stabilizes reconstruction and prevents large gradient spikes. |
+| **Stage 1 – Structural Adaptation** | All layers except the final K high-level blocks and output heads are frozen. This phase allows the model to learn the greyscale→colour mapping while preserving the pretrained feature hierarchy. | 3e-4 | **Charbonnier (L1)** – stabilizes reconstruction and prevents large gradient spikes. |
 | **Stage 2 – Full Fine-Tuning** | All layers are unfrozen for end-to-end optimization, enabling the model to refine colour consistency and semantic detail. | 5e-5 | **L1 + LPIPS + UV + SAT**<br>• *L1:* pixel-wise consistency.<br>• *LPIPS:* perceptual similarity.<br>• *UV:* chroma-weighted loss (with cosine-decayed λ<sub>UV</sub>).<br>• *SAT:* saturation prior to prevent dull colours. |
 
 **Key Features:**
@@ -282,69 +288,134 @@ outputs/predict/mamba_colorizer/
 
 ## Training Hardware
 
+| Resource | Specification |
+|-----------|---------------|
+| **GPU** | NVIDIA A100 SXM (1× GPU) |
+| **vCPU** | 32 cores (AMD EPYC processor) |
+| **System Memory** | 250 GB RAM |
+| **Container Disk** | 100 GB SSD storage |
+
+**Notes:**  
+- Training and testing were conducted on a runpod.io A100 pod with the following image: `runpod/base:1.0.2-ubuntu2204`.
+- Training was performed on a single A100 GPU with mixed-precision (AMP) enabled.  
+- High system memory and CPU thread count ensured fast COCO dataset preprocessing and dataloader throughput.  
+- All experiments ran inside an isolated containerized environment for full reproducibility.
+
 ---
 
 ## Example Results and Analysis
 
-Below are output panels produced by the model. Each panel shows **Input (left)** and **Predicted Colour Output (right)** side by side. These are all sourced from the test set available at [*this Github repo*](https://github.com/gayanku/greyscale-colorization). The full set as predicted by the Model can be found in the [assets folder of the repo.](./assets/)
+The following examples showcase the qualitative performance of the colourization model on unseen test images. Each panel shows **Input (left)** and **Predicted Colour Output (right)** side by side. 
+ These are all sourced from the test set available at [*this Github repo*](https://github.com/gayanku/greyscale-colorization). The full set as predicted by the Model can be found in the [assets folder of the repo.](./assets/)
 
-> ⚠️ These are representative examples — actual panels are automatically generated during validation and saved under `outputs/<exp>/panels/`. 
-> Panels are also generated by `predict.py` when ran with a test set and these can be found under `outputs/predict/<exp>/panels/`.
-
-### 🌄 Example 1 — Natural Landscape
-![Landscape Panel Placeholder](./outputs/panels/landscape_panel.png)
-
-**Analysis:**  
-- The model successfully captures blue sky and green vegetation.  
-- Subtle tone variations are consistent with natural lighting.  
-- Slight over-saturation observed at tree edges (LPIPS term dominating).  
+> Panels are generated by `predict.py` when ran with a test set and these can be found under `outputs/predict/<exp>/panels/`.
 
 ---
 
-### 🏠 Example 2 — Indoor Scene
-![Indoor Scene Placeholder](./outputs/panels/indoor_panel.png)
+### Example 1 — Brisbane City Story Bridge (Strong Result)
+![Urban Bridge](./assets/G_1.jpg)
 
 **Analysis:**  
-- Performs well on artificial lighting, maintaining realistic wall colour.  
-- Misses fine object edges (suggests need for stronger L1 weighting).  
+- Outstanding tonal and colour reconstruction; realistic sky-blue and steel hues.  
+- Model preserved architectural detail and shadow balance.  
+- Represents the ideal outcome of Stage 1’s structural adaptation with stable pretrained RGB priors.  
 
 ---
 
-### 👩 Example 3 — Human Portrait
-![Portrait Panel Placeholder](./outputs/panels/portrait_panel.png)
+### Example 2 — Ocean Sunset (Strong Result)
+![Ocean Sunset](./assets/G_15.jpg)
 
 **Analysis:**  
-- Produces generally consistent skin tones, though slightly cool.  
-- Model bias toward cool hues due to limited warm-tone samples in COCO dataset.  
+- Excellent chroma transition between sky and reflection.  
+- Maintains depth and subtle warmth without oversaturation.  
+- Demonstrates balanced L1 + LPIPS interaction and effective luminance retention.  
 
 ---
 
-### 🌺 Example 4 — Flowers / Natural Warm Tones
-![Flowers Panel Placeholder](./outputs/panels/flowers_panel.png)
+### Example 3 — Lighthouse Scene (Strong Result)
+![Lighthouse Scene](./assets/G_3.jpg)
 
 **Analysis:**  
-- Model struggles to recover vivid reds/yellows — a dataset limitation.  
-- Future dataset expansion (e.g. ImageNet fine-tuning) should address this.  
+- Excellent global illumination with realistic sky blues and sea hues.  
+- Smooth chroma transition across horizon; no visible colour banding or artefacts.  
+- Structural features such as the tower edges and roof textures remain crisp and correctly shaded.  
+- Slightly cool cast on shadows shows minor bias from pretrained RGB weights, but overall chroma-luminance balance is highly convincing.  
+- Exemplifies strong Stage 1 feature retention and stable UV–SAT loss interaction.
+
+### Example 4 — Bird on Blossoms (Strong Result)
+![Bird on Blossoms](./assets/G_22.jpg)
+
+**Analysis:**  
+- Highly natural composition: distinct warm tones on feathers and muted background.  
+- Fine edge fidelity shows strong mid-level feature retention.  
+- Model generalizes well to organic textures with moderate chroma complexity.  
+
+---
+
+### Example 5 — Flower Macro (Moderate Result)
+![Flower Macro](./assets/G_21.jpg)
+
+**Analysis:**  
+- Sharp detail and consistent lighting, but hue variation is limited.  
+- Sepia cast across petals indicates early UV-loss decay.  
+- LPIPS dominated texture reconstruction over colour vibrancy.  
+
+---
+
+### Example 6 — Mona Lisa (Moderate Result)
+![Mona Lisa](./assets/G_11.jpg)
+
+**Analysis:**  
+- Retains painting texture faithfully, though chroma remains subdued.  
+- Luminance mapping strong; however, warm hues underdeveloped.  
+- Confirms desaturation pattern introduced by full unfreezing in Stage 2.  
+
+---
+
+### Example 7 — Basket of Produce (Weak Result)
+![Basket of Produce](./assets/G_10.jpg)
+
+**Analysis:**  
+- Colour diversity lost; uniform brown tint dominates.  
+- Suggests low-level feature drift after Stage 2 unfreezing.  
+- Could improve through partial freezing or extended λ<sub>UV</sub> hold to preserve chroma gradients.  
+
+---
+
+### Summary
+
+Across the test set, the model consistently reproduces **realistic structure and tonal balance**, particularly in **outdoor daylight scenes** (G₁, G₇, G₂₂).  
+However, chroma intensity diminishes in **low-saturation or artificial-light scenarios** (G₂₁, G₁₁, G₁₀), aligning with the desaturation trends observed post–Stage 2, reflecting the Stage 2 trade-off between perceptual (LPIPS) and chroma (UV) optimization.    
+
+**Future improvements:**
+- Retain partial layer freezing to prevent chroma drift.  
+- Extend λ<sub>UV</sub> decay scheduling for sustained colour richness.  
+- Introduce warm-tone and artistic-domain augmentations to increase hue diversity.
 
 ---
 
 ## Training Performance and Plots
 
-Below are placeholders for loss curves to be added once training is complete.
+![Training Curves](./assets/plots.svg)
 
-![Placeholder: Training Curves](./outputs/mamba_colorizer_latest/plots_placeholder.svg)
+**Observed Behaviour:**
 
-**Expected Observations:**
-- Steady decline in L1 and LPIPS losses during early epochs.  
-- UV loss stabilizes mid-training as λ<sub>UV</sub> decays.  
-- Cosine LR schedule smooths convergence without oscillations.  
-- Validation loss curve flattens toward final epochs, indicating convergence.  
+| Phase | Behaviour | Interpretation |
+|:------|:-----------|:----------------|
+| **Stage 1 (Epoch 1–5)** | Sharp L1 ↓ and LPIPS ↓; UV loss stable | Model learned grayscale→colour mapping while keeping pretrained spatial filters intact. |
+| **Transition to Stage 2** | Spike in total loss due to new UV + SAT terms | Expected when switching objectives. |
+| **Stage 2 (Epoch 6–10)** | Gradual total-loss decline but rising LPIPS/L1 ratio | Perceptual term began dominating; low-level weights over-adapted. |
+| **Validation curves** | Plateaued after mid-training | Indicates convergence; further fine-tuning yields diminishing returns. |
+
+### Summary
+
+**Overall, the two-stage strategy achieved stable convergence and perceptually realistic outputs with diminishing returns beyond epoch 9–10.**
 
 ---
 
 ## Notes on Preprocessing & Splits
 
-- Equalized grayscale improves contrast and texture awareness.  
+- Equalized greyscale improves contrast and texture awareness.  
 - Cosine decay for λ<sub>UV</sub> balances early chroma learning with late texture refinement.  
 - Mixed-precision training improves VRAM efficiency without numerical instability.  
 - COCO’s dataset variety enables the model to generalize across lighting and material types.  
@@ -386,7 +457,8 @@ Below are placeholders for loss curves to be added once training is complete.
 
 ## Acknowledgements
 
-This repository extends the official **MambaIRv2** implementation with a custom fine-tuning and evaluation pipeline for colour restoration.  
+This repository extends the official **MambaIRv2** implementation with a custom fine-tuning and evaluation pipeline for colour restoration. This project demonstrates the practical application of advanced state-space architectures to an ill-posed inverse imaging task.
+
 Developed by **Youssef Hassan** for the **COMP3710 Pattern Analysis (2025)** project at **The University of Queensland**.
 
 Special thanks to Dr. Shakes Chandra, Dr Gayan Kulatilleke, and my Runpod.io credits.

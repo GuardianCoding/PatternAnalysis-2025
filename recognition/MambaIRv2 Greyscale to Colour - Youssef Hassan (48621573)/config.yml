@@ -75,7 +75,7 @@ warmup_steps: 500
 ema_decay: 0.9995
 
 # ==== Training schedule ====
-epochs: 15
+epochs: 10
 stage1_epochs: 5                  # partial unfreezing duration
 stage1_last_k_blocks: 2           # K blocks kept trainable in Stage 1
 grad_accum: 4                     # gradient accumulation
